@@ -341,6 +341,7 @@ struct microlink_s {
     /* State (atomic reads from any task, writes only from coord) */
     volatile microlink_state_t state;
     volatile uint32_t vpn_ip;
+    volatile bool auth_error;   /* headboard-led: last RegisterResponse rejected the auth key */
 
     /* Event group (cross-task synchronization) */
     EventGroupHandle_t events;

@@ -589,6 +589,10 @@ bool microlink_is_connected(const microlink_t *ml) {
     return ml && ml->state == ML_STATE_CONNECTED;
 }
 
+bool microlink_auth_failed(const microlink_t *ml) {
+    return ml && ml->auth_error;
+}
+
 uint32_t microlink_get_vpn_ip(const microlink_t *ml) {
     return ml ? ml->vpn_ip : 0;
 }

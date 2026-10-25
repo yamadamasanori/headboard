@@ -1,0 +1,4 @@
+MicroLink v2 (https://github.com/CamM2325/microlink) commit 216da3300f0493b0860247d43f7af5ce29df63a5, MIT
+headboard-led local patches:
+- auth_error flag + microlink_auth_failed() (see ml_coord.c do_register)
+- ml_derp.c: periodic HEARTBEAT log lowered from WARN to DEBUG

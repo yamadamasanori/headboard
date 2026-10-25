@@ -947,6 +947,21 @@ static int do_register(microlink_t *ml, ml_noise_state_t *noise) {
     parse_start[parse_len] = saved;
     free(resp_buf);
 
+    /* headboard-led: detect a rejected auth key (Error) or a request for
+     * interactive login (AuthURL) so the app can report it. */
+    {
+        cJSON *reg_err = cJSON_GetObjectItem(resp_json, "Error");
+        cJSON *auth_url = cJSON_GetObjectItem(resp_json, "AuthURL");
+        bool has_err = cJSON_IsString(reg_err) && reg_err->valuestring[0];
+        bool has_url = cJSON_IsString(auth_url) && auth_url->valuestring[0];
+        ml->auth_error = has_err || has_url;
+        if (has_err) {
+            ESP_LOGE(TAG, "Registration rejected: %s", reg_err->valuestring);
+        } else if (has_url) {
+            ESP_LOGE(TAG, "Auth key not accepted (interactive login requested)");
+        }
+    }
+
     /* Extract our VPN IP from Node.Addresses */
     cJSON *node = cJSON_GetObjectItem(resp_json, "Node");
     if (node) {
