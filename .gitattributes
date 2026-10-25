@@ -1,0 +1,2 @@
+# 本家 MicroLink は CRLF のまま保存し、改変の差分を小さく保つ
+components/microlink/** -text
