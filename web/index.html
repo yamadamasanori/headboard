@@ -1,0 +1,468 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ヘッドボードLED 設定</title>
+<script type="module" src="vendor/esp-web-tools/install-button.js"></script>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #fff; --text: #1d2330; --muted: #667085; --line: #d9dde4;
+    --accent: #2563eb; --accent-text: #fff; --ok: #15803d; --err: #b91c1c; --log: #0f172a; --log-text: #cbd5e1;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115; --card: #181b22; --text: #e6e8ec; --muted: #9aa3b2; --line: #2b313c;
+      --accent: #60a5fa; --accent-text: #0b1220; --ok: #4ade80; --err: #f87171; --log: #0a0c10; --log-text: #aab4c3;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.6 system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 1.4rem; margin: 0 0 4px; }
+  h2 { font-size: 1.1rem; margin: 0 0 12px; }
+  p.lead { color: var(--muted); margin: 0 0 20px; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 18px; margin-bottom: 16px; }
+  .note { color: var(--muted); font-size: .9rem; }
+  .warn { color: var(--err); }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 16px; }
+  @media (max-width: 560px) { .grid { grid-template-columns: 1fr; } }
+  label { display: block; font-size: .85rem; color: var(--muted); margin-bottom: 4px; }
+  input[type=text], input[type=password], input[type=number] {
+    width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit;
+  }
+  fieldset { border: 0; padding: 0; margin: 0 0 16px; }
+  legend { font-weight: 600; margin-bottom: 8px; }
+  button {
+    font: inherit; padding: 8px 16px; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent); color: var(--accent-text); cursor: pointer;
+  }
+  button.secondary { background: transparent; color: var(--accent); }
+  button.danger { background: transparent; color: var(--err); border-color: var(--err); }
+  button:disabled { opacity: .45; cursor: default; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .status { font-size: .9rem; }
+  .status .ok { color: var(--ok); } .status .ng { color: var(--err); }
+  .light { display: grid; grid-template-columns: 7em 1fr 3.5em; gap: 10px; align-items: center; margin: 8px 0; }
+  input[type=range] { width: 100%; }
+  pre#log { background: var(--log); color: var(--log-text); border-radius: 8px; padding: 10px; height: 420px; overflow: auto; font-size: 12px; margin: 8px 0 0; white-space: pre-wrap; word-break: break-all; }
+  pre#log .e { color: #f87171; } pre#log .w { color: #facc15; } pre#log .p { color: #7dd3fc; }
+  .logbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .logbar input[type=text] { width: 12em; padding: 6px 8px; }
+  .logbar button { padding: 6px 12px; }
+  #logInfo { font-size: .85rem; color: var(--muted); margin-top: 6px; min-height: 1.4em; }
+  #logInfo.paused { color: var(--err); }
+  .mqtt-err { color: var(--err); }
+  #msg { min-height: 1.6em; margin-top: 10px; }
+  #msg.ok { color: var(--ok); } #msg.err { color: var(--err); }
+  .disabled-area { opacity: .5; pointer-events: none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>ヘッドボードLED 設定</h1>
+  <p class="lead">ESP32 を USB で接続して、ファームウェアの書き込みと Wi-Fi・MQTT・Tailscale の設定を行います。</p>
+
+  <section id="unsupported" hidden>
+    <p class="warn">このブラウザは Web Serial に対応していません。パソコンの Chrome または Edge で開いてください。</p>
+  </section>
+
+  <section>
+    <h2>1. ファームウェアを書き込む</h2>
+    <p class="note">ボタンを押して ESP32 のシリアルポートを選びます。初めて書き込むときは「消去」を選ぶと保存済みの設定も消えます。</p>
+    <esp-web-install-button manifest="manifest.json">
+      <button slot="activate">ESP32 に書き込む</button>
+      <span slot="unsupported" class="warn">このブラウザでは書き込みできません（Chrome / Edge を使ってください）。</span>
+      <span slot="not-allowed" class="warn">HTTPS または localhost で開いたページからのみ書き込めます。</span>
+    </esp-web-install-button>
+    <p class="note">書き込み画面を閉じてから、下の「2. 設定」で接続してください（同じポートを同時には使えません）。</p>
+  </section>
+
+  <section>
+    <h2>2. 設定</h2>
+    <div class="row">
+      <button id="btnConnect">ESP32 に接続</button>
+      <button id="btnDisconnect" class="secondary" disabled>切断</button>
+      <span id="devInfo" class="note"></span>
+    </div>
+
+    <form id="cfgForm" class="disabled-area" style="margin-top:16px" autocomplete="off">
+      <fieldset>
+        <legend>Wi-Fi</legend>
+        <div class="grid">
+          <div><label for="wifi_ssid">アクセスポイント名（SSID）</label><input id="wifi_ssid" type="text" maxlength="32"></div>
+          <div><label for="wifi_pass">パスワード</label><input id="wifi_pass" type="password" maxlength="64"></div>
+        </div>
+      </fieldset>
+      <fieldset>
+        <legend>MQTT（Home Assistant）</legend>
+        <div class="grid">
+          <div><label for="mqtt_host">ブローカーのホスト名 / IP</label><input id="mqtt_host" type="text" maxlength="63" placeholder="例: 192.168.1.10"></div>
+          <div><label for="mqtt_port">ポート</label><input id="mqtt_port" type="number" min="1" max="65535"></div>
+          <div><label for="mqtt_user">ユーザー名</label><input id="mqtt_user" type="text" maxlength="63"></div>
+          <div><label for="mqtt_pass">パスワード</label><input id="mqtt_pass" type="password" maxlength="63"></div>
+        </div>
+      </fieldset>
+      <fieldset>
+        <legend>Tailscale</legend>
+        <div class="grid">
+          <div><label><input id="ts_enabled" type="checkbox"> Tailscale で tailnet に接続する</label></div>
+          <div></div>
+          <div><label for="ts_authkey">認証キー（tskey-auth-…）</label><input id="ts_authkey" type="password" maxlength="127"></div>
+          <div><label for="ts_hostname">tailnet 上のホスト名</label><input id="ts_hostname" type="text" maxlength="63" pattern="[a-z0-9][a-z0-9\-]*"></div>
+        </div>
+        <p class="note">認証キーは Tailscale 管理画面の Settings → Keys で作成します。MQTT ブローカーのホスト名に tailnet の名前（例: homeassistant）か tailnet のアドレス（100.64〜100.127）を入れると、Tailscale 経由で接続します。IP アドレス以外のホスト名は、LAN の名前でも Tailscale の接続を待ってから繋ぎます。</p>
+      </fieldset>
+      <fieldset>
+        <legend>デバイス</legend>
+        <div class="grid">
+          <div><label for="device_name">Home Assistant での表示名</label><input id="device_name" type="text" maxlength="47"></div>
+          <div><label for="pwm_freq">PWM 周波数 [Hz]</label><input id="pwm_freq" type="number" min="100" max="20000"></div>
+          <div><label for="pin_reading">読書灯の GPIO</label><input id="pin_reading" type="number" min="0" max="48"></div>
+          <div><label for="pin_backlight">バックライトの GPIO</label><input id="pin_backlight" type="number" min="0" max="48"></div>
+          <div><label><input id="pwm_invert" type="checkbox"> 出力を反転する（アクティブ Low の回路用）</label></div>
+          <div><label><input id="log_verbose" type="checkbox"> 詳細ログを出す（Tailscale・Wi-Fi の途中経過。調査用）</label></div>
+        </div>
+      </fieldset>
+      <fieldset>
+        <legend>状態表示 LED（基板上のフルカラー LED）</legend>
+        <div class="grid">
+          <div><label for="sled_pin">GPIO（-1 で使わない）</label><input id="sled_pin" type="number" min="-1" max="48"></div>
+          <div><label for="sled_brightness">明るさ（1〜255）</label><input id="sled_brightness" type="number" min="1" max="255"></div>
+          <div><label><input id="sled_always_on" type="checkbox"> 正常なときも緑で点灯し続ける</label></div>
+        </div>
+        <p class="note">紫: Wi-Fi 未設定 ／ 青: Wi-Fi 接続中 ／ 水色: Tailscale 接続中 ／ 黄: MQTT 接続待ち ／ 赤: 認証エラー ／ 緑: 正常（既定では 10 秒後に消灯）</p>
+      </fieldset>
+      <div class="row">
+        <button type="submit" id="btnSave">保存して再起動</button>
+        <button type="button" id="btnReload" class="secondary">読み込み直す</button>
+        <button type="button" id="btnReset" class="danger">初期化</button>
+      </div>
+      <div id="msg"></div>
+    </form>
+  </section>
+
+  <section id="testArea" class="disabled-area">
+    <h2>3. 動作確認</h2>
+    <div class="status" id="status">未接続</div>
+    <div class="light"><span>読書灯</span><input type="range" min="0" max="255" value="0" data-id="reading"><span id="v_reading">0</span></div>
+    <div class="light"><span>バックライト</span><input type="range" min="0" max="255" value="0" data-id="backlight"><span id="v_backlight">0</span></div>
+    <div class="row"><button type="button" id="btnStatus" class="secondary">状態を更新</button>
+      <label style="margin:0"><input type="checkbox" id="autoStatus" checked> 3 秒ごとに自動更新</label></div>
+  </section>
+
+  <section>
+    <h2>ログ</h2>
+    <div class="logbar">
+      <button type="button" id="btnPause" class="secondary">一時停止</button>
+      <button type="button" id="btnCopy" class="secondary">直近500行をコピー</button>
+      <button type="button" id="btnSaveLog" class="secondary">ファイルに保存</button>
+      <button type="button" id="btnClearLog" class="secondary">消去</button>
+      <input type="text" id="logFilter" placeholder="絞り込み（例: mqtt）">
+      <label style="margin:0"><input type="checkbox" id="logWarnOnly"> 警告とエラーだけ</label>
+    </div>
+    <pre id="log"></pre>
+    <div id="logInfo"></div>
+  </section>
+
+  <p class="note">ライセンス: <a href="LICENSE.txt">このソフトウェア（MIT）</a> ／ <a href="THIRD_PARTY_NOTICES.txt">ファームウェアと設定ページに含まれる第三者のソフトウェア</a></p>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const textFields = ["wifi_ssid", "wifi_pass", "mqtt_host", "mqtt_user", "mqtt_pass", "device_name", "ts_authkey", "ts_hostname"];
+const secretFields = ["wifi_pass", "mqtt_pass", "ts_authkey"];
+const numFields = ["mqtt_port", "pin_reading", "pin_backlight", "pwm_freq", "sled_pin", "sled_brightness"];
+const indicatorNames = {
+  starting: "起動中", wifi_unconfigured: "紫・Wi-Fi 未設定", wifi_connecting: "青・Wi-Fi 接続中",
+  tailscale_connecting: "水色・Tailscale 接続中", tailscale_auth_error: "赤・Tailscale 認証エラー",
+  mqtt_connecting: "黄・MQTT 接続待ち", mqtt_refused: "赤・MQTT 接続拒否", ok: "緑・正常", disabled: "使わない",
+};
+
+let port = null, reader = null, writer = null, waiters = [], lineBuf = "";
+
+if (!("serial" in navigator)) $("unsupported").hidden = false;
+
+// ---- ログ欄 ----
+// 受信したログはすべて logLines に貯め（最大 LOG_MAX 行）、表示は絞り込み・一時停止に合わせて描き直す
+const LOG_MAX = 20000, LOG_VIEW = 1500;
+let logLines = [], paused = false, pendingWhilePaused = 0, renderQueued = false;
+
+function logLevel(text) {
+  const m = /^([EWIDV]) \(\d+\)/.exec(text);
+  return m ? m[1] : (text.startsWith("[ページ]") ? "P" : "");
+}
+
+function log(text, fromPage = true) {
+  text = text.replace(/\x1b\[[0-9;]*m/g, "");
+  if (fromPage) text = "[ページ] " + text;
+  const t = new Date().toTimeString().slice(0, 8);
+  logLines.push({ t, text, lv: logLevel(text) });
+  if (logLines.length > LOG_MAX) logLines.splice(0, logLines.length - LOG_MAX);
+  if (paused) { pendingWhilePaused++; updateLogInfo(); return; }
+  queueRender();
+}
+
+function filteredLines() {
+  const q = $("logFilter").value.trim().toLowerCase();
+  const warnOnly = $("logWarnOnly").checked;
+  return logLines.filter((l) => (!warnOnly || l.lv === "E" || l.lv === "W") && (!q || l.text.toLowerCase().includes(q)));
+}
+
+function escapeHtml(s) {
+  return s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+}
+
+function renderLog() {
+  renderQueued = false;
+  const el = $("log");
+  const lines = filteredLines().slice(-LOG_VIEW);
+  el.innerHTML = lines.map((l) => {
+    const cls = l.lv === "E" ? "e" : l.lv === "W" ? "w" : l.lv === "P" ? "p" : "";
+    const body = escapeHtml(l.t + " " + l.text);
+    return cls ? `<span class="${cls}">${body}</span>` : body;
+  }).join("\n");
+  el.scrollTop = el.scrollHeight;
+  updateLogInfo();
+}
+
+function queueRender() {
+  if (!renderQueued) { renderQueued = true; requestAnimationFrame(renderLog); }
+}
+
+function updateLogInfo() {
+  const info = $("logInfo");
+  info.className = paused ? "paused" : "";
+  info.textContent = paused
+    ? `一時停止中（新しいログ ${pendingWhilePaused} 行は受信済み。「再開」で表示します）`
+    : `${logLines.length} 行を受信（表示は絞り込み後の最新 ${LOG_VIEW} 行まで）`;
+}
+
+function setPaused(p) {
+  paused = p;
+  $("btnPause").textContent = p ? "再開" : "一時停止";
+  if (!p) { pendingWhilePaused = 0; queueRender(); }
+  updateLogInfo();
+}
+
+function logAsText(lines) {
+  return lines.map((l) => l.t + " " + l.text).join("\n") + "\n";
+}
+
+$("btnPause").addEventListener("click", () => setPaused(!paused));
+$("btnClearLog").addEventListener("click", () => { logLines = []; pendingWhilePaused = 0; renderLog(); });
+$("logFilter").addEventListener("input", queueRender);
+$("logWarnOnly").addEventListener("change", queueRender);
+// ログ欄を上にスクロールしたら自動で一時停止する
+$("log").addEventListener("wheel", (e) => { if (e.deltaY < 0 && !paused) setPaused(true); });
+$("log").addEventListener("scroll", () => {
+  const el = $("log");
+  if (!paused && el.scrollTop + el.clientHeight < el.scrollHeight - 40 && document.activeElement === el) setPaused(true);
+});
+$("btnCopy").addEventListener("click", async () => {
+  const text = logAsText(filteredLines().slice(-500));
+  try {
+    await navigator.clipboard.writeText(text);
+    $("logInfo").textContent = "直近 500 行（絞り込み後）をコピーしました";
+  } catch {
+    // クリップボードが使えないときは、ログ欄の内容を選択状態にする
+    const r = document.createRange(); r.selectNodeContents($("log"));
+    const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r);
+    $("logInfo").textContent = "コピーできなかったので、ログ欄を選択しました。Ctrl+C でコピーしてください";
+  }
+});
+$("btnSaveLog").addEventListener("click", () => {
+  const blob = new Blob([logAsText(logLines)], { type: "text/plain" });
+  const a = document.createElement("a");
+  const ts = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+  a.href = URL.createObjectURL(blob);
+  a.download = `headboard-led-log-${ts}.txt`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+});
+
+function showMsg(text, kind) {
+  const m = $("msg");
+  m.textContent = text;
+  m.className = kind || "";
+}
+
+function setConnected(on) {
+  $("btnConnect").disabled = on;
+  $("btnDisconnect").disabled = !on;
+  $("cfgForm").classList.toggle("disabled-area", !on);
+  $("testArea").classList.toggle("disabled-area", !on);
+  if (!on) { $("devInfo").textContent = ""; $("status").textContent = "未接続"; }
+}
+
+// "@@" で始まる行がファームウェアからの応答、それ以外はログ
+function handleLine(line) {
+  if (!line.startsWith("@@")) { if (line.trim()) log(line, false); return; }
+  let msg;
+  try { msg = JSON.parse(line.slice(2)); } catch { log(line, false); return; }
+  if (msg.type !== "status") log("ESP32 から応答: " + msg.type + (msg.message ? "（" + msg.message + "）" : ""));
+  if (msg.type === "hello") $("devInfo").textContent = `${msg.device_id} / v${msg.version} / ${msg.chip}`;
+  if (msg.type === "config" || msg.type === "saved") fillForm(msg.config);
+  if (msg.type === "status") showStatus(msg);
+  if (msg.type === "error") showMsg(msg.message, "err");
+  const i = waiters.findIndex((w) => w.types.includes(msg.type));
+  if (i >= 0) { const w = waiters.splice(i, 1)[0]; clearTimeout(w.timer); w.resolve(msg); }
+}
+
+function waitFor(types, ms = 3000) {
+  return new Promise((resolve, reject) => {
+    const w = { types, resolve };
+    w.timer = setTimeout(() => { waiters = waiters.filter((x) => x !== w); reject(new Error("timeout")); }, ms);
+    waiters.push(w);
+  });
+}
+
+async function send(obj) {
+  if (!writer) return;
+  await writer.write(new TextEncoder().encode(JSON.stringify(obj) + "\n"));
+}
+
+async function request(obj, types, ms) {
+  const p = waitFor(types, ms);
+  await send(obj);
+  return p;
+}
+
+async function readLoop() {
+  const decoder = new TextDecoder();
+  while (port && port.readable) {
+    reader = port.readable.getReader();
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        lineBuf += decoder.decode(value, { stream: true });
+        let idx;
+        while ((idx = lineBuf.indexOf("\n")) >= 0) {
+          handleLine(lineBuf.slice(0, idx).replace(/\r$/, ""));
+          lineBuf = lineBuf.slice(idx + 1);
+        }
+      }
+    } catch (e) {
+      log("読み取りエラー: " + e.message);
+    } finally {
+      reader.releaseLock();
+      reader = null;
+    }
+    if (!port) break;
+  }
+}
+
+async function connect() {
+  try {
+    port = await navigator.serial.requestPort();
+    await port.open({ baudRate: 115200 });
+    // DTR/RTS を下げて、ESP32 がリセット状態やダウンロードモードに入らないようにする
+    await port.setSignals({ dataTerminalReady: false, requestToSend: false });
+    writer = port.writable.getWriter();
+    setConnected(true);
+    log("接続しました");
+    readLoop();
+    await loadAll();
+  } catch (e) {
+    log("接続できませんでした: " + e.message);
+    await disconnect();
+  }
+}
+
+async function disconnect() {
+  try { if (reader) await reader.cancel(); } catch {}
+  try { if (writer) { writer.releaseLock(); writer = null; } } catch {}
+  try { if (port) await port.close(); } catch {}
+  port = null;
+  setConnected(false);
+}
+
+async function loadAll() {
+  // 接続直後に ESP32 が再起動することがあるので、応答があるまで数回試す
+  for (let i = 0; i < 5; i++) {
+    try {
+      await request({ cmd: "hello" }, ["hello"], 1500);
+      await request({ cmd: "get" }, ["config"]);
+      await request({ cmd: "status" }, ["status"]);
+      showMsg("");
+      return;
+    } catch {}
+  }
+  showMsg("ESP32 から応答がありません。ファームウェアが書き込まれているか確認してください。", "err");
+}
+
+function fillForm(c) {
+  for (const k of textFields) if (k in c) $(k).value = c[k];
+  for (const k of numFields) if (k in c) $(k).value = c[k];
+  $("pwm_invert").checked = !!c.pwm_invert;
+  $("ts_enabled").checked = !!c.ts_enabled;
+  $("sled_always_on").checked = !!c.sled_always_on;
+  $("log_verbose").checked = !!c.log_verbose;
+  for (const k of secretFields) {
+    $(k).value = "";
+    $(k).placeholder = c[k + "_set"] ? "設定済み（変更しない場合は空欄）" : "";
+  }
+}
+
+function showStatus(s) {
+  const yn = (b) => b ? '<span class="ok">接続中</span>' : '<span class="ng">未接続</span>';
+  $("status").innerHTML = `Wi-Fi: ${yn(s.wifi_connected)}${s.ip ? " (" + s.ip + (s.rssi !== undefined ? ", " + s.rssi + " dBm" : "") + ")" : ""}`
+    + ` ／ MQTT: ${yn(s.mqtt_connected)}${s.mqtt_connected && s.mqtt_addr ? " (" + escapeHtml(s.mqtt_addr) + ")" : ""}`
+    + (s.tailscale && s.tailscale.enabled ? ` ／ Tailscale: ${yn(s.tailscale.state === "connected")}${s.tailscale.ip ? " (" + s.tailscale.ip + ")" : " (" + s.tailscale.state + ")"}` : "")
+    + (!s.mqtt_connected && s.mqtt_error ? `<br><span class="mqtt-err">MQTT: ${escapeHtml(s.mqtt_error)}</span>` : "")
+    + (s.status_led ? `<br>状態表示 LED: ${indicatorNames[s.status_led] || s.status_led}` : "")
+    + `<br><span class="note">MQTT トピック: ${s.mqtt_base_topic}/…</span>`;
+  for (const [id, l] of Object.entries(s.lights || {})) {
+    const v = l.state === "ON" ? l.brightness : 0;
+    const r = document.querySelector(`input[data-id="${id}"]`);
+    if (r && document.activeElement !== r) r.value = v;
+    $("v_" + id).textContent = v;
+  }
+}
+
+$("cfgForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const cfg = {};
+  for (const k of textFields) cfg[k] = $(k).value;
+  for (const k of secretFields) if (!cfg[k]) delete cfg[k];
+  for (const k of numFields) cfg[k] = Number($(k).value);
+  cfg.pwm_invert = $("pwm_invert").checked;
+  cfg.ts_enabled = $("ts_enabled").checked;
+  cfg.sled_always_on = $("sled_always_on").checked;
+  cfg.log_verbose = $("log_verbose").checked;
+  try {
+    const r = await request({ cmd: "set", config: cfg, reboot: true }, ["saved", "error"]);
+    if (r.type === "saved") {
+      showMsg("保存しました。ESP32 を再起動しています…", "ok");
+      setTimeout(loadAll, 4000);
+    }
+  } catch { showMsg("応答がありません", "err"); }
+});
+
+$("btnReload").addEventListener("click", loadAll);
+$("btnStatus").addEventListener("click", () => send({ cmd: "status" }));
+// 接続中は状態を自動で取り直す（MQTT の失敗理由などを追えるように）
+setInterval(() => { if (writer && $("autoStatus").checked) send({ cmd: "status" }).catch(() => {}); }, 3000);
+$("btnReset").addEventListener("click", async () => {
+  if (!confirm("保存されている設定をすべて消去して再起動します。よろしいですか？")) return;
+  await send({ cmd: "factory_reset" });
+  showMsg("初期化しました。再起動しています…", "ok");
+  setTimeout(loadAll, 4000);
+});
+$("btnConnect").addEventListener("click", connect);
+$("btnDisconnect").addEventListener("click", disconnect);
+
+let sliderTimer = {};
+document.querySelectorAll('input[type=range]').forEach((r) => {
+  r.addEventListener("input", () => {
+    const id = r.dataset.id, v = Number(r.value);
+    $("v_" + id).textContent = v;
+    clearTimeout(sliderTimer[id]);
+    sliderTimer[id] = setTimeout(() => send({ cmd: "light", id, state: v > 0 ? "ON" : "OFF", brightness: v, transition: 0.2 }), 80);
+  });
+});
+
+if ("serial" in navigator) navigator.serial.addEventListener("disconnect", (e) => { if (e.target === port) { log("USB が切断されました"); disconnect(); } });
+</script>
+</body>
+</html>

@@ -1,0 +1,20 @@
+{
+  "name": "headboard-led (ESP-IDF v5.3.1)",
+  "image": "espressif/idf:v5.3.1",
+  "mounts": [
+    // build/ は macOS の bind mount だと遅いので named volume に置く
+    "source=headboard-build,target=${containerWorkspaceFolder}/build,type=volume"
+  ],
+  // 設定ページ（tools/serve.py）用。ブラウザはホストで開く
+  "forwardPorts": [8000],
+  "customizations": {
+    "vscode": {
+      "extensions": ["ms-python.python", "ms-vscode.cpptools"],
+      "settings": {
+        // ホストの python を使わないよう、イメージ内の IDF 用 Python を指定する
+        "python.defaultInterpreterPath": "/opt/esp/python_env/idf5.3_py3.10_env/bin/python",
+        "C_Cpp.default.compileCommands": "${containerWorkspaceFolder}/build/compile_commands.json"
+      }
+    }
+  }
+}
