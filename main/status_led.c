@@ -43,6 +43,7 @@ static const rgb_t C_BLACK = {0, 0, 0};
 static rmt_channel_handle_t s_chan;
 static rmt_encoder_handle_t s_enc;
 static volatile int64_t s_pulse_until_us;
+static volatile status_hint_t s_hint;
 static const char *volatile s_indicator = "starting";
 
 static volatile bool s_busy;
@@ -91,8 +92,12 @@ static bool decide(rgb_t *color, pattern_t *pat)
     net_state_t st;
     net_get_state(&st);
 
-    if (!st.wifi_configured) {
-        *color = C_PURPLE, *pat = PAT_BLINK_SLOW, s_indicator = "wifi_unconfigured";
+    if (s_hint == STATUS_HINT_WIFI_RESET) {
+        *color = C_WHITE, *pat = PAT_SOLID, s_indicator = "button_wifi_reset";
+    } else if (s_hint == STATUS_HINT_FACTORY_RESET) {
+        *color = C_RED, *pat = PAT_SOLID, s_indicator = "button_factory_reset";
+    } else if (!st.wifi_configured) {
+        *color = C_PURPLE, *pat = PAT_BLINK_SLOW, s_indicator = st.ble_setup ? "ble_setup" : "wifi_unconfigured";
     } else if (!st.wifi_up) {
         *color = C_BLUE, *pat = PAT_BLINK_FAST, s_indicator = "wifi_connecting";
     } else if (g_cfg.ts_enabled && ts_has_error()) {
@@ -150,6 +155,11 @@ static void led_task(void *arg)
             last = out;
         }
     }
+}
+
+void status_led_set_hint(status_hint_t hint)
+{
+    s_hint = hint;
 }
 
 void status_led_pulse(void)

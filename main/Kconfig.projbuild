@@ -1,0 +1,11 @@
+menu "ヘッドボードLED"
+
+config HEADBOARD_USB_SETUP
+    bool "USB から設定を変更できるようにする（開発用）"
+    default n
+    help
+        有効にすると、USB 接続の設定ページから Wi-Fi・MQTT などを変更できます。
+        量産版では無効にし、Bluetooth（Wi-Fi）と本体の設定ページ（その他）で設定します。
+        無効でも、USB からの状態表示・ログ・ラベル表示・点灯テストは使えます。
+
+endmenu

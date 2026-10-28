@@ -3,8 +3,13 @@
 #include <stdio.h>
 #include <string.h>
 #include "driver/gpio.h"
+#include "esp_efuse.h"
+#include "esp_efuse_table.h"
 #include "esp_log.h"
 #include "esp_mac.h"
+#include "esp_random.h"
+#include "esp_wifi.h"
+#include "mbedtls/sha256.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 
@@ -43,6 +48,73 @@ const char *config_device_id(void)
         snprintf(s_device_id, sizeof(s_device_id), "headboard_%02x%02x%02x", mac[3], mac[4], mac[5]);
     }
     return s_device_id;
+}
+
+const char *config_hostname(void)
+{
+    static char s[24];
+    if (!s[0]) {
+        snprintf(s, sizeof(s), "headboard-%s", config_device_id() + strlen("headboard_"));
+    }
+    return s;
+}
+
+const char *config_prov_name(void)
+{
+    static char s[24];
+    if (!s[0]) {
+        // 公式アプリ（ESP BLE Provisioning）は既定で "PROV_" で始まる名前を探す
+        snprintf(s, sizeof(s), "PROV_HB_%s", config_device_id() + strlen("headboard_"));
+    }
+    return s;
+}
+
+// チップ固有の ID（eFuse の OPTIONAL_UNIQUE_ID）。書き込まれていないチップでは、
+// 初回起動時に乱数を作って NVS に残す（設定の初期化では消さない）
+static void chip_secret(uint8_t out[16])
+{
+    memset(out, 0, 16);
+    esp_efuse_read_field_blob(ESP_EFUSE_OPTIONAL_UNIQUE_ID, out, 128);
+    for (int i = 0; i < 16; i++) {
+        if (out[i]) {
+            return;
+        }
+    }
+    nvs_handle_t h;
+    if (nvs_open("fctry", NVS_READWRITE, &h) != ESP_OK) {
+        esp_fill_random(out, 16);
+        return;
+    }
+    size_t len = 16;
+    if (nvs_get_blob(h, "secret", out, &len) != ESP_OK || len != 16) {
+        esp_fill_random(out, 16);
+        nvs_set_blob(h, "secret", out, 16);
+        nvs_commit(h);
+    }
+    nvs_close(h);
+}
+
+const char *config_pop(void)
+{
+    static char s[9];
+    if (!s[0]) {
+        // 読み間違えやすい 0/O/1/I を除いた 32 文字で 8 文字（40 ビット）
+        static const char alphabet[] = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+        uint8_t secret[16], hash[32];
+        chip_secret(secret);
+        mbedtls_sha256_context ctx;
+        mbedtls_sha256_init(&ctx);
+        mbedtls_sha256_starts(&ctx, 0);
+        mbedtls_sha256_update(&ctx, (const uint8_t *)"headboard-pop", 13);
+        mbedtls_sha256_update(&ctx, secret, sizeof(secret));
+        mbedtls_sha256_finish(&ctx, hash);
+        mbedtls_sha256_free(&ctx);
+        for (int i = 0; i < 8; i++) {
+            s[i] = alphabet[hash[i] & 31];
+        }
+        s[8] = 0;
+    }
+    return s;
 }
 
 static void load_str(nvs_handle_t h, const char *key, char *dst, size_t len)
@@ -130,8 +202,17 @@ esp_err_t config_factory_reset(void)
     nvs_erase_all(h);
     err = nvs_commit(h);
     nvs_close(h);
+    esp_wifi_restore();
     set_defaults();
     return err;
+}
+
+esp_err_t config_clear_wifi(void)
+{
+    g_cfg.wifi_ssid[0] = 0;
+    g_cfg.wifi_pass[0] = 0;
+    esp_wifi_restore();  // Wi-Fi ドライバが別に保存している接続先も消す
+    return config_save();
 }
 
 static void set_ts_reset_flag(void)

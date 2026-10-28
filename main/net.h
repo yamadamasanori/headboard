@@ -10,6 +10,7 @@ typedef struct {
     bool mqtt_configured;
     bool mqtt_up;
     bool mqtt_refused;   // ブローカーに接続を拒否された（ユーザー名・パスワード違いなど）
+    bool ble_setup;      // Bluetooth で Wi-Fi の設定を待っている
 } net_state_t;
 
 // Wi-Fi に接続し、接続後に MQTT（Home Assistant 連携）を開始する

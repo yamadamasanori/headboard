@@ -15,8 +15,11 @@
 #include "lwip/def.h"
 #include "leds.h"
 #include "mqtt_client.h"
+#include "ota.h"
+#include "provision.h"
 #include "tailscale.h"
 #include "status_led.h"
+#include "webui.h"
 
 static const char *TAG = "net";
 
@@ -284,9 +287,15 @@ static void retry_cb(TimerHandle_t t)
 static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
+        // Bluetooth で設定中は、設定の受け付け側（provision.c）が接続する
+        if (g_cfg.wifi_ssid[0]) {
+            esp_wifi_connect();
+        }
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         s_wifi_up = false;
+        if (!g_cfg.wifi_ssid[0]) {
+            return;
+        }
         // 失敗が続くほど間隔を延ばす（最大 60 秒）
         int delay_s = s_retry < 6 ? (1 << s_retry) : 60;
         if (delay_s > 60) {
@@ -302,6 +311,8 @@ static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, voi
         ESP_LOGI(TAG, "Wi-Fi connected, IP " IPSTR, IP2STR(&e->ip_info.ip));
         s_wifi_up = true;
         s_retry = 0;
+        ota_mark_valid();  // Wi-Fi に繋がったので、更新したファームウェアを正常とみなす
+        webui_start();
         if (g_cfg.ts_enabled) {
             ts_on_wifi_up(mqtt_start);
         }
@@ -328,11 +339,6 @@ void net_start(void)
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-    if (!g_cfg.wifi_ssid[0]) {
-        ESP_LOGW(TAG, "Wi-Fi is not configured. Use the setup page over USB.");
-        return;
-    }
-
     s_netif = esp_netif_create_default_wifi_sta();
     esp_netif_set_hostname(s_netif, config_device_id());
     wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT();
@@ -340,6 +346,13 @@ void net_start(void)
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event_handler, NULL));
     s_retry_timer = xTimerCreate("wifi_retry", pdMS_TO_TICKS(1000), pdFALSE, NULL, retry_cb);
+
+    if (!g_cfg.wifi_ssid[0]) {
+        ESP_LOGW(TAG, "Wi-Fi is not configured. Set it up over Bluetooth (ESP BLE Provisioning app)");
+        ota_mark_valid();
+        prov_start();
+        return;
+    }
 
     wifi_config_t wc = {0};
     strlcpy((char *)wc.sta.ssid, g_cfg.wifi_ssid, sizeof(wc.sta.ssid));
@@ -374,6 +387,8 @@ void net_status_to_json(cJSON *o)
     cJSON_AddStringToObject(o, "mqtt_addr", addr);
     cJSON_AddStringToObject(o, "mqtt_error", s_mqtt_up ? "" : s_mqtt_error);
     cJSON_AddStringToObject(o, "mqtt_base_topic", s_base);
+    cJSON_AddStringToObject(o, "hostname", config_hostname());
+    cJSON_AddBoolToObject(o, "ble_setup", prov_is_active());
     ts_status_to_json(o);
 }
 
@@ -384,4 +399,5 @@ void net_get_state(net_state_t *st)
     st->mqtt_configured = g_cfg.mqtt_host[0] != 0;
     st->mqtt_up = s_mqtt_up;
     st->mqtt_refused = s_mqtt_refused;
+    st->ble_setup = prov_is_active();
 }

@@ -4,9 +4,9 @@
 
 配布物ごとの内訳:
 
-- **ソース（このリポジトリ）**: 1・2 を同梱しています
-- **ファームウェア（`web/firmware/headboard-led.bin`）**: 1 と 3 が組み込まれています
-- **設定ページ（`web/`）**: 2 を使っています
+- **ソース（このリポジトリ）**: 1・2・4・5 を同梱しています
+- **ファームウェア（`web/firmware/headboard-led.bin`、`headboard-led-ota.bin`）**: 1・3・4 が組み込まれています。本体の設定ページとして 5 も組み込まれています
+- **設定ページ（`web/`）**: 2・5 を使っています
 
 ---
 
@@ -101,15 +101,42 @@ ESP Web Tools のビルド済みファイルには、次のライブラリも含
 | wpa_supplicant | Copyright (c) 2002-2022, Jouni Malinen and contributors | BSD 3-Clause |
 | FreeBSD net80211 | Copyright (c) 2004-2008 Sam Leffler, Errno Consulting | BSD |
 | TLSF | Copyright (c) 2006-2016 Matthew Conte | BSD 3-Clause |
+| NimBLE（Bluetooth LE のホスト、Apache Mynewt） | Copyright 2015-2023 The Apache Software Foundation | Apache License 2.0 |
+| Bluetooth コントローラ、Wi-Fi プロビジョニング、HTTP サーバー | Copyright (C) 2015-2023 Espressif Systems | Apache License 2.0 |
 | Newlib | 各著作者 | BSD 系（[COPYING.NEWLIB](https://github.com/espressif/esp-idf/blob/v5.3.1/components/newlib/COPYING.NEWLIB)） |
 
 Apache License 2.0 の全文は [web/vendor/esp-web-tools/LICENSE](web/vendor/esp-web-tools/LICENSE)、または https://www.apache.org/licenses/LICENSE-2.0 にあります。
 
 ---
 
+## 4. mDNS（`components/mdns/`）
+
+- 配布元: https://github.com/espressif/esp-protocols （mdns-v1.8.2、コミット e9d7350219dfb5e39eb56e5ef60c094190888c55。テストとサンプルを除いて同梱、改変なし）
+- ライセンス: Apache License 2.0（全文は [components/mdns/LICENSE](components/mdns/LICENSE)）
+
+```
+Copyright (C) 2015-2024 Espressif Systems (Shanghai) CO LTD
+```
+
+---
+
+## 5. QR Code Generator（`web/vendor/qrcode-generator/`）
+
+- 配布元: https://github.com/kazuhikoarase/qrcode-generator （2.0.4、改変なし）
+- ライセンス: MIT（全文は [web/vendor/qrcode-generator/LICENSE](web/vendor/qrcode-generator/LICENSE)）
+- 本体ラベルの QR コードを作るために使っています
+
+```
+Copyright (c) 2009 Kazuhiko Arase
+```
+
+「QR コード」は株式会社デンソーウェーブの登録商標です。
+
+---
+
 ## ライセンス全文
 
-### MIT License（MicroLink、STROBE X25519、FreeRTOS、cJSON、Xtensa ヘッダー、pako）
+### MIT License（MicroLink、STROBE X25519、FreeRTOS、cJSON、Xtensa ヘッダー、pako、QR Code Generator）
 
 上記の各著作権表示に、次の許諾文が適用されます。
 

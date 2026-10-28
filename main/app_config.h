@@ -6,7 +6,7 @@
 #include "cJSON.h"
 #include "esp_err.h"
 
-#define FW_VERSION "1.3.0"
+#define FW_VERSION "2.0.0"
 
 #define STATUS_LED_DISABLED 0xFF
 
@@ -39,9 +39,21 @@ extern app_config_t g_cfg;
 // MAC アドレスから作るデバイス固有ID（例: headboard_a1b2c3）
 const char *config_device_id(void);
 
+// 本体の設定ページのホスト名（例: headboard-a1b2c3。".local" を付けて開く）
+const char *config_hostname(void);
+
+// Bluetooth での Wi-Fi 設定に使う名前（例: PROV_HB_a1b2c3）
+const char *config_prov_name(void);
+
+// 本体ごとのコード（PoP）。Bluetooth での Wi-Fi 設定と、本体の設定ページのログインに使う。
+// チップ固有の ID から作るので、書き込み直しや初期化をしても変わらない（ラベルに印刷する）
+const char *config_pop(void);
+
 void config_load(void);
 esp_err_t config_save(void);
 esp_err_t config_factory_reset(void);
+// Wi-Fi の設定だけを消す（Bluetooth で設定し直すとき）
+esp_err_t config_clear_wifi(void);
 
 // 認証キーが変わったとき、次回起動時に Tailscale の鍵を作り直すための印
 bool config_take_ts_reset_flag(void);
