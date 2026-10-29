@@ -104,9 +104,10 @@ void console_start(void)
     s_lock = xSemaphoreCreateMutex();
     ESP_ERROR_CHECK(uart_driver_install(CONSOLE_UART, 2048, 0, 0, NULL, 0));
     uart_vfs_dev_use_driver(CONSOLE_UART);
-    xTaskCreate(uart_task, "console_uart", 6144, NULL, 4, NULL);
+    // uart_task はすぐに USB にも hello を送るので、先に USB のドライバーを入れておく
     usb_serial_jtag_driver_config_t usj = {.rx_buffer_size = 1024, .tx_buffer_size = 2048};
     ESP_ERROR_CHECK(usb_serial_jtag_driver_install(&usj));
+    xTaskCreate(uart_task, "console_uart", 6144, NULL, 4, NULL);
     xTaskCreate(usb_task, "console_usb", 6144, NULL, 4, NULL);
     ESP_LOGI(TAG, "setup console ready on UART%d and USB", CONSOLE_UART);
 }

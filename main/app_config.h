@@ -6,7 +6,7 @@
 #include "cJSON.h"
 #include "esp_err.h"
 
-#define FW_VERSION "2.0.0"
+#define FW_VERSION "2.1.0"
 
 #define STATUS_LED_DISABLED 0xFF
 
@@ -29,6 +29,8 @@ typedef struct {
     uint8_t sled_brightness;// 状態表示 LED の明るさ 1〜255
     bool sled_always_on;    // 正常時も点灯し続ける（false なら 10 秒後に消灯）
     bool log_verbose;       // Tailscale などの詳細ログも出す（調査用）
+    float watt_reading;     // 読書灯の定格消費電力 [W]（消費電力の推定用）
+    float watt_backlight;   // バックライトの定格消費電力 [W]
 } app_config_t;
 
 // ログの出し方を設定に合わせる（起動時と設定変更時に呼ぶ）

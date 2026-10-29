@@ -11,6 +11,7 @@
 #include "leds.h"
 #include "logbuf.h"
 #include "net.h"
+#include "usage.h"
 #include "status_led.h"
 #include "tailscale.h"
 
@@ -97,6 +98,7 @@ static void send_status(const sink_t *k)
 static void restart_later(void)
 {
     vTaskDelay(pdMS_TO_TICKS(300));
+    usage_flush();
     esp_restart();
 }
 

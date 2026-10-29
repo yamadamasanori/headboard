@@ -12,6 +12,7 @@
 #include "mbedtls/sha256.h"
 #include "nvs.h"
 #include "nvs_flash.h"
+#include "usage.h"
 
 #if !CONFIG_IDF_TARGET_ESP32S3
 #error "ESP32-S3 専用です（idf.py set-target esp32s3）"
@@ -35,6 +36,8 @@ static void set_defaults(void)
     g_cfg.sled_always_on = false;
     g_cfg.pwm_freq = 5000;
     g_cfg.pwm_invert = false;
+    g_cfg.watt_reading = 1.0f;
+    g_cfg.watt_backlight = 1.0f;
     g_cfg.ts_enabled = false;
     // Tailscale のホスト名には "_" が使えないので "-" にする
     snprintf(g_cfg.ts_hostname, sizeof(g_cfg.ts_hostname), "headboard-%s", config_device_id() + strlen("headboard_"));
@@ -158,6 +161,13 @@ void config_load(void)
         g_cfg.log_verbose = flag != 0;
     }
     load_str(h, "ts_host", g_cfg.ts_hostname, sizeof(g_cfg.ts_hostname));
+    uint32_t mw;
+    if (nvs_get_u32(h, "mw_read", &mw) == ESP_OK) {
+        g_cfg.watt_reading = mw / 1000.0f;
+    }
+    if (nvs_get_u32(h, "mw_back", &mw) == ESP_OK) {
+        g_cfg.watt_backlight = mw / 1000.0f;
+    }
     nvs_close(h);
     ESP_LOGI(TAG, "config loaded (ssid=\"%s\", mqtt=%s:%u)", g_cfg.wifi_ssid, g_cfg.mqtt_host, g_cfg.mqtt_port);
 }
@@ -187,6 +197,8 @@ esp_err_t config_save(void)
     nvs_set_u8(h, "sled_bri", g_cfg.sled_brightness);
     nvs_set_u8(h, "sled_on", g_cfg.sled_always_on ? 1 : 0);
     nvs_set_u8(h, "log_verb", g_cfg.log_verbose ? 1 : 0);
+    nvs_set_u32(h, "mw_read", (uint32_t)(g_cfg.watt_reading * 1000.0f + 0.5f));
+    nvs_set_u32(h, "mw_back", (uint32_t)(g_cfg.watt_backlight * 1000.0f + 0.5f));
     err = nvs_commit(h);
     nvs_close(h);
     return err;
@@ -203,6 +215,7 @@ esp_err_t config_factory_reset(void)
     err = nvs_commit(h);
     nvs_close(h);
     esp_wifi_restore();
+    usage_reset();  // 点灯時間などの累計も消す
     set_defaults();
     return err;
 }
@@ -261,6 +274,9 @@ void config_to_json(cJSON *o)
     cJSON_AddNumberToObject(o, "sled_brightness", g_cfg.sled_brightness);
     cJSON_AddBoolToObject(o, "sled_always_on", g_cfg.sled_always_on);
     cJSON_AddBoolToObject(o, "log_verbose", g_cfg.log_verbose);
+    // float のままだと 0.10000000149 のようになるので、mW 単位で丸める
+    cJSON_AddNumberToObject(o, "watt_reading", (int)(g_cfg.watt_reading * 1000.0f + 0.5f) / 1000.0);
+    cJSON_AddNumberToObject(o, "watt_backlight", (int)(g_cfg.watt_backlight * 1000.0f + 0.5f) / 1000.0);
 }
 
 void config_apply_log_levels(void)
@@ -336,6 +352,20 @@ static bool take_int(const cJSON *o, const char *key, int min, int max, int *out
     return true;
 }
 
+static bool take_watt(const cJSON *o, const char *key, float *out, char *err, size_t err_len)
+{
+    const cJSON *v = cJSON_GetObjectItemCaseSensitive(o, key);
+    if (!v) {
+        return true;
+    }
+    if (!cJSON_IsNumber(v) || v->valuedouble < 0 || v->valuedouble > 100) {
+        snprintf(err, err_len, "%s は 0〜100 W で指定してください", key);
+        return false;
+    }
+    *out = (float)v->valuedouble;
+    return true;
+}
+
 bool config_from_json(const cJSON *o, char *err, size_t err_len)
 {
     // 失敗したときに途中まで反映されないよう、コピーに対して適用する
@@ -356,7 +386,9 @@ bool config_from_json(const cJSON *o, char *err, size_t err_len)
         !take_int(o, "pin_backlight", 0, 48, &pb, err, err_len) ||
         !take_int(o, "pwm_freq", 100, 20000, &freq, err, err_len) ||
         !take_int(o, "sled_pin", -1, 48, &sp, err, err_len) ||
-        !take_int(o, "sled_brightness", 1, 255, &sb, err, err_len)) {
+        !take_int(o, "sled_brightness", 1, 255, &sb, err, err_len) ||
+        !take_watt(o, "watt_reading", &c.watt_reading, err, err_len) ||
+        !take_watt(o, "watt_backlight", &c.watt_backlight, err, err_len)) {
         return false;
     }
     if (!valid_output_pin(pr) || !valid_output_pin(pb)) {

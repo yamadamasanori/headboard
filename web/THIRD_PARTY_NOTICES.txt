@@ -101,6 +101,7 @@ ESP Web Tools のビルド済みファイルには、次のライブラリも含
 | wpa_supplicant | Copyright (c) 2002-2022, Jouni Malinen and contributors | BSD 3-Clause |
 | FreeBSD net80211 | Copyright (c) 2004-2008 Sam Leffler, Errno Consulting | BSD |
 | TLSF | Copyright (c) 2006-2016 Matthew Conte | BSD 3-Clause |
+| ESP x509 証明書バンドル（Mozilla の CA 証明書の一覧から生成。Home Assistant からの更新で HTTPS の証明書を確かめるのに使う） | Mozilla Foundation ほか | Mozilla Public License 2.0（元のデータ: https://curl.se/ca/cacert.pem 、https://www.mozilla.org/MPL/2.0/ ） |
 | NimBLE（Bluetooth LE のホスト、Apache Mynewt） | Copyright 2015-2023 The Apache Software Foundation | Apache License 2.0 |
 | Bluetooth コントローラ、Wi-Fi プロビジョニング、HTTP サーバー | Copyright (C) 2015-2023 Espressif Systems | Apache License 2.0 |
 | Newlib | 各著作者 | BSD 系（[COPYING.NEWLIB](https://github.com/espressif/esp-idf/blob/v5.3.1/components/newlib/COPYING.NEWLIB)） |

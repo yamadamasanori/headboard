@@ -20,6 +20,7 @@
 #include "tailscale.h"
 #include "status_led.h"
 #include "webui.h"
+#include "ha.h"
 
 static const char *TAG = "net";
 
@@ -32,6 +33,8 @@ static bool s_mqtt_up;
 static bool s_mqtt_refused;
 static int s_retry;
 static TimerHandle_t s_retry_timer;
+static uint32_t s_wifi_drops;       // 繋がっていた Wi-Fi が切れた回数（起動してから）
+static uint32_t s_mqtt_connects;    // MQTT に繋がった回数（2 回目以降が再接続）
 
 static char s_base[48];           // headboard/<id>
 static char s_avail_topic[64];    // headboard/<id>/status
@@ -80,13 +83,7 @@ static void publish_discovery(void)
         cJSON_AddNumberToObject(o, "brightness_scale", 255);
         cJSON_AddStringToObject(o, "icon", i == LIGHT_READING ? "mdi:book-open-variant" : "mdi:led-strip-variant");
 
-        cJSON *dev = cJSON_AddObjectToObject(o, "device");
-        cJSON *ids = cJSON_AddArrayToObject(dev, "identifiers");
-        cJSON_AddItemToArray(ids, cJSON_CreateString(dev_id));
-        cJSON_AddStringToObject(dev, "name", g_cfg.device_name);
-        cJSON_AddStringToObject(dev, "manufacturer", "DIY");
-        cJSON_AddStringToObject(dev, "model", "ESP32 Headboard LED");
-        cJSON_AddStringToObject(dev, "sw_version", FW_VERSION);
+        ha_add_device(o);
 
         char *payload = cJSON_PrintUnformatted(o);
         esp_mqtt_client_publish(s_mqtt, topic, payload, 0, 1, 1);
@@ -100,6 +97,7 @@ static void on_mqtt_connected(void)
     s_mqtt_up = true;
     s_mqtt_refused = false;
     s_mqtt_error[0] = 0;
+    s_mqtt_connects++;
     ESP_LOGI(TAG, "MQTT connected");
     esp_mqtt_client_publish(s_mqtt, s_avail_topic, "online", 0, 1, 1);
     publish_discovery();
@@ -111,6 +109,7 @@ static void on_mqtt_connected(void)
     }
     // Home Assistant 再起動時に自動探索の設定を送り直すため
     esp_mqtt_client_subscribe(s_mqtt, HA_PREFIX "/status", 1);
+    ha_on_mqtt_connected(s_mqtt, s_base, s_avail_topic);
 }
 
 static void on_mqtt_data(esp_mqtt_event_handle_t ev)
@@ -127,7 +126,11 @@ static void on_mqtt_data(esp_mqtt_event_handle_t ev)
             for (int i = 0; i < LIGHT_COUNT; i++) {
                 publish_state(i);
             }
+            ha_on_mqtt_connected(s_mqtt, s_base, s_avail_topic);
         }
+        return;
+    }
+    if (ha_handle_message(topic, ev->data, ev->data_len)) {
         return;
     }
     for (int i = 0; i < LIGHT_COUNT; i++) {
@@ -206,6 +209,7 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t event_i
             set_mqtt_error("ブローカーとの接続が切れました（再接続中）");
         }
         s_mqtt_up = false;
+        ha_on_mqtt_disconnected();
         break;
     case MQTT_EVENT_DATA:
         on_mqtt_data(ev);
@@ -268,6 +272,7 @@ static void mqtt_start(void)
         .session.last_will.qos = 1,
         .session.last_will.retain = 1,
         .session.keepalive = 30,
+        .buffer.size = 2048,  // 自動探索の設定と診断情報が 1 KB 前後になる
         .network.reconnect_timeout_ms = 5000,
     };
     s_mqtt = esp_mqtt_client_init(&cfg);
@@ -292,6 +297,9 @@ static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, voi
             esp_wifi_connect();
         }
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        if (s_wifi_up) {
+            s_wifi_drops++;
+        }
         s_wifi_up = false;
         if (!g_cfg.wifi_ssid[0]) {
             return;
@@ -390,6 +398,31 @@ void net_status_to_json(cJSON *o)
     cJSON_AddStringToObject(o, "hostname", config_hostname());
     cJSON_AddBoolToObject(o, "ble_setup", prov_is_active());
     ts_status_to_json(o);
+}
+
+void net_diag_to_json(cJSON *o)
+{
+    char ip[16] = "";
+    wifi_ap_record_t ap;
+    bool have_ap = s_wifi_up && esp_wifi_sta_get_ap_info(&ap) == ESP_OK;
+    if (s_wifi_up && s_netif) {
+        esp_netif_ip_info_t info;
+        if (esp_netif_get_ip_info(s_netif, &info) == ESP_OK) {
+            snprintf(ip, sizeof(ip), IPSTR, IP2STR(&info.ip));
+        }
+    }
+    cJSON_AddStringToObject(o, "ip", ip);
+    if (have_ap) {
+        char bssid[18];
+        snprintf(bssid, sizeof(bssid), "%02x:%02x:%02x:%02x:%02x:%02x",
+                 ap.bssid[0], ap.bssid[1], ap.bssid[2], ap.bssid[3], ap.bssid[4], ap.bssid[5]);
+        cJSON_AddNumberToObject(o, "rssi", ap.rssi);
+        cJSON_AddStringToObject(o, "wifi_ssid", (const char *)ap.ssid);
+        cJSON_AddStringToObject(o, "wifi_bssid", bssid);
+        cJSON_AddNumberToObject(o, "wifi_channel", ap.primary);
+    }
+    cJSON_AddNumberToObject(o, "wifi_disconnects", s_wifi_drops);
+    cJSON_AddNumberToObject(o, "mqtt_reconnects", s_mqtt_connects > 0 ? s_mqtt_connects - 1 : 0);
 }
 
 void net_get_state(net_state_t *st)

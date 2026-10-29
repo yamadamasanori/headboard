@@ -8,4 +8,13 @@ config HEADBOARD_USB_SETUP
         量産版では無効にし、Bluetooth（Wi-Fi）と本体の設定ページ（その他）で設定します。
         無効でも、USB からの状態表示・ログ・ラベル表示・点灯テストは使えます。
 
+config HEADBOARD_UPDATE_URL
+    string "ファームウェアの配布元（Home Assistant からの更新用）"
+    default "https://yamadamasanori.github.io/headboard/"
+    help
+        manifest.json と firmware/headboard-led-ota.bin を置いた URL（末尾は /）。
+        本体が 6 時間ごとに manifest.json を見て新しい版を探し、Home Assistant の
+        「更新」から書き込めるようにします。空にすると、この機能を使いません。
+        HTTPS で取得し、サーバーの証明書を確かめます。
+
 endmenu

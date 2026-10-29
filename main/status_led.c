@@ -43,6 +43,7 @@ static const rgb_t C_BLACK = {0, 0, 0};
 static rmt_channel_handle_t s_chan;
 static rmt_encoder_handle_t s_enc;
 static volatile int64_t s_pulse_until_us;
+static volatile int64_t s_identify_until_us;
 static volatile status_hint_t s_hint;
 static const char *volatile s_indicator = "starting";
 
@@ -151,6 +152,9 @@ static void led_task(void *arg)
         if (now_us < s_pulse_until_us) {
             out = C_GREEN;
         }
+        if (now_us < s_identify_until_us) {
+            out = blink_on(PAT_BLINK_FAST, now_ms) ? C_WHITE : C_BLACK;
+        }
         if (memcmp(&out, &last, sizeof(out)) != 0 && show(out)) {
             last = out;
         }
@@ -165,6 +169,11 @@ void status_led_set_hint(status_hint_t hint)
 void status_led_pulse(void)
 {
     s_pulse_until_us = esp_timer_get_time() + PULSE_MS * 1000;
+}
+
+void status_led_identify(uint32_t ms)
+{
+    s_identify_until_us = esp_timer_get_time() + (int64_t)ms * 1000;
 }
 
 void status_led_start(void)

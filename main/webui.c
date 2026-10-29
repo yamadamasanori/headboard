@@ -19,6 +19,7 @@
 #include "logbuf.h"
 #include "mdns.h"
 #include "ota.h"
+#include "usage.h"
 
 static const char *TAG = "webui";
 
@@ -361,6 +362,7 @@ static esp_err_t h_ws(httpd_req_t *req)
 
 static void restart_cb(void *arg)
 {
+    usage_flush();
     esp_restart();
 }
 

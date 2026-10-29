@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stdint.h>
+
 // オンボードのフルカラー LED（WS2812）で、Wi-Fi / Tailscale / MQTT の状態を表示する
 //   紫・ゆっくり点滅  Wi-Fi 未設定（Bluetooth での設定待ち）
 //   青・速い点滅      Wi-Fi 接続中・切断
@@ -22,6 +24,9 @@ void status_led_set_hint(status_hint_t hint);
 
 // Home Assistant からの操作を受けたときに、緑を一瞬光らせる
 void status_led_pulse(void);
+
+// 本体の場所を知らせるため、白で速く点滅させる（Home Assistant の「本体を光らせる」ボタン）
+void status_led_identify(uint32_t ms);
 
 // いま表示している状態の名前（"wifi_connecting"、"ok" など。設定ページの表示用）
 const char *status_led_indicator(void);

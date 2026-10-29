@@ -6,12 +6,14 @@
 
 #include "app_config.h"
 #include "button.h"
+#include "ha.h"
 #include "console.h"
 #include "esp_log.h"
 #include "leds.h"
 #include "logbuf.h"
 #include "net.h"
 #include "nvs_flash.h"
+#include "usage.h"
 #include "status_led.h"
 
 void app_main(void)
@@ -28,7 +30,9 @@ void app_main(void)
     config_load();
     config_apply_log_levels();
     leds_init();
+    usage_init();
     console_start();
+    ha_init();
     net_start();
     status_led_start();
     button_start();

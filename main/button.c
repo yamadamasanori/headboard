@@ -6,6 +6,7 @@
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "usage.h"
 #include "status_led.h"
 #include "tailscale.h"
 
@@ -46,6 +47,7 @@ static void button_task(void *arg)
         } else if (held_ms >= WIFI_RESET_MS) {
             ESP_LOGW(TAG, "Wi-Fi settings cleared by button");
             config_clear_wifi();
+            usage_flush();
             esp_restart();
         }
         held_ms = 0;

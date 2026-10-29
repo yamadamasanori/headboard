@@ -31,6 +31,9 @@ bool leds_apply_command(light_id_t id, const char *payload, int len);
 // 直接設定（brightness 0〜255、0 で消灯）
 void leds_set(light_id_t id, bool on, int brightness, uint32_t transition_ms);
 
+// いまの出力のデューティ比（0〜1、フェード中は途中の値。消費電力の推定用）
+float leds_output_ratio(light_id_t id);
+
 // 現在の状態を Home Assistant 形式の JSON で返す（呼び出し側で free）
 char *leds_state_json(light_id_t id);
 void leds_state_to_json(light_id_t id, cJSON *obj);

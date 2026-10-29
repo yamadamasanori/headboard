@@ -9,6 +9,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "usage.h"
 
 static const char *TAG = "leds";
 
@@ -146,6 +147,7 @@ void leds_set(light_id_t id, bool on, int brightness, uint32_t transition_ms)
     }
     xSemaphoreTake(s_lock, portMAX_DELAY);
     light_t *l = &s_lights[id];
+    bool was_on = l->on;
     if (on && brightness == 0) {
         on = false;
     } else if (brightness > 0) {
@@ -157,6 +159,9 @@ void leds_set(light_id_t id, bool on, int brightness, uint32_t transition_ms)
     l->t_start_us = esp_timer_get_time();
     l->dur_ms = transition_ms;
     xSemaphoreGive(s_lock);
+    if (on && !was_on) {
+        usage_light_turned_on(id);
+    }
     if (s_cb) {
         s_cb(id);
     }
@@ -204,6 +209,14 @@ bool leds_apply_command(light_id_t id, const char *payload, int len)
 
     leds_set(id, on, brightness, fade_ms);
     return true;
+}
+
+float leds_output_ratio(light_id_t id)
+{
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    float level = s_lights[id].level;
+    xSemaphoreGive(s_lock);
+    return s_max_duty ? (float)level_to_duty(level) / s_max_duty : 0.0f;
 }
 
 void leds_state_to_json(light_id_t id, cJSON *o)

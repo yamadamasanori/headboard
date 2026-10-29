@@ -19,5 +19,8 @@ void net_start(void);
 // Wi-Fi / MQTT の接続状態を JSON に書き出す
 void net_status_to_json(cJSON *obj);
 
+// Home Assistant 向けの診断情報（IP、電波の強さ、接続先のアクセスポイント、切断・再接続の回数）
+void net_diag_to_json(cJSON *obj);
+
 // 状態表示 LED 用に、接続状態をまとめて返す
 void net_get_state(net_state_t *st);
