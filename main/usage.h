@@ -16,7 +16,7 @@ void usage_light_turned_on(light_id_t id);
 // 意図して再起動する直前に呼ぶ（最後の保存からの分を書き込む）
 void usage_flush(void);
 
-// 累計を 0 に戻す（工場出荷時に戻すとき）
+// 累計を 0 に戻す（工場出荷時に戻すとき・設定ページの「累計をクリア」）
 void usage_reset(void);
 
 // Home Assistant 向けの値を o に追加する

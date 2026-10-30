@@ -53,6 +53,7 @@ typedef enum {
     CAT_NONE,
     CAT_DIAG,     // 診断（デバイスのページの「診断」欄）
     CAT_CONFIG,   // 設定（デバイスのページの「設定」欄）
+    CAT_CONFIG_OFF,  // 設定のうち、普段使わず誤操作を避けたいもの（利用者が有効にするまで使えない）
 } category_t;
 
 typedef enum {
@@ -119,6 +120,7 @@ static const entity_t ENTITIES[] = {
     // 操作（command_topic は <base>/<key>/set）
     {"button", "restart", "再起動", CAT_CONFIG, WHEN_ALWAYS, NULL, "restart", NULL, NULL, -1, NULL},
     {"button", "identify", "本体を光らせる", CAT_CONFIG, WHEN_ALWAYS, NULL, "identify", NULL, NULL, -1, NULL},
+    {"button", "reset_usage", "累計をクリア", CAT_CONFIG_OFF, WHEN_ALWAYS, NULL, NULL, NULL, NULL, -1, "mdi:counter"},
     {"number", "sled_brightness", "状態表示 LED の明るさ", CAT_CONFIG, WHEN_ALWAYS, V("cfg.sled_brightness"), NULL, NULL, NULL, -1, "mdi:brightness-6"},
     {"switch", "sled_always_on", "状態表示 LED を常に点灯", CAT_CONFIG, WHEN_ALWAYS, ON_OFF("cfg.sled_always_on"), NULL, NULL, NULL, -1, "mdi:led-on"},
     {"switch", "log_verbose", "詳細ログ", CAT_CONFIG, WHEN_ALWAYS, ON_OFF("cfg.log_verbose"), NULL, NULL, NULL, -1, "mdi:text-box-search-outline"},
@@ -169,8 +171,11 @@ static void publish_entity(const entity_t *e)
     cJSON_AddStringToObject(o, "availability_topic", s_avail);
     if (e->cat == CAT_DIAG) {
         cJSON_AddStringToObject(o, "entity_category", "diagnostic");
-    } else if (e->cat == CAT_CONFIG) {
+    } else if (e->cat == CAT_CONFIG || e->cat == CAT_CONFIG_OFF) {
         cJSON_AddStringToObject(o, "entity_category", "config");
+    }
+    if (e->cat == CAT_CONFIG_OFF) {
+        cJSON_AddFalseToObject(o, "enabled_by_default");
     }
     if (e->value) {
         snprintf(buf, sizeof(buf), "%s/diag", s_base);
@@ -530,6 +535,9 @@ bool ha_handle_message(const char *topic, const char *data, int len)
         request(REQ_RESTART);
     } else if (strcmp(key, "identify") == 0) {
         status_led_identify(IDENTIFY_MS);
+    } else if (strcmp(key, "reset_usage") == 0) {
+        usage_reset();
+        request(REQ_PUBLISH);
     } else if (strcmp(key, "update") == 0) {
         if (payload_is(data, len, "install")) {
             request(REQ_INSTALL);

@@ -122,7 +122,7 @@ void cmd_handle(const char *line, cmd_src_t src, cmd_send_fn_t fn, void *ctx)
             send_error(&k, "JSON を解釈できません");
         } else if (src == CMD_SRC_USB) {
             // 手入力向けの簡易ヘルプ
-            printf("commands: {\"cmd\":\"hello|get|status|set|light|prev_log|reboot|factory_reset\"}\n");
+            printf("commands: {\"cmd\":\"hello|get|status|set|light|prev_log|reboot|reset_usage|factory_reset\"}\n");
         }
         cJSON_Delete(req);
         return;
@@ -175,6 +175,9 @@ void cmd_handle(const char *line, cmd_src_t src, cmd_send_fn_t fn, void *ctx)
     } else if (strcmp(c, "reboot") == 0) {
         send(&k, reply("rebooting"));
         restart_later();
+    } else if (strcmp(c, "reset_usage") == 0) {
+        usage_reset();
+        send(&k, reply("usage_reset"));
     } else if (strcmp(c, "factory_reset") == 0) {
         config_factory_reset();
         ts_factory_reset();

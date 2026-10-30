@@ -172,6 +172,7 @@
       <div class="row">
         <button type="submit" id="btnSave">保存して再起動</button>
         <button type="button" id="btnReload" class="secondary">読み込み直す</button>
+        <button type="button" id="btnResetUsage" class="danger">累計をクリア</button>
         <button type="button" id="btnReset" class="danger">初期化</button>
       </div>
       <div id="msg"></div>
@@ -633,6 +634,13 @@ $("btnReload").addEventListener("click", loadAll);
 $("btnStatus").addEventListener("click", () => send({ cmd: "status" }));
 // 接続中は状態を自動で取り直す（MQTT の失敗理由などを追えるように）
 setInterval(() => { if (transport && $("autoStatus").checked) send({ cmd: "status" }).catch(() => {}); }, 3000);
+$("btnResetUsage").addEventListener("click", async () => {
+  if (!confirm("起動回数・電圧低下の回数・異常な再起動の回数と、ライトごとの点灯時間・点灯回数・電力量を 0 に戻します。設定は消えません。よろしいですか？")) return;
+  try {
+    const r = await request({ cmd: "reset_usage" }, ["usage_reset", "error"]);
+    if (r.type === "usage_reset") showMsg("累計をクリアしました（Home Assistant には 1 分以内に反映されます）", "ok");
+  } catch { showMsg("応答がありません", "err"); }
+});
 $("btnReset").addEventListener("click", async () => {
   const extra = mode === "web" ? "\n初期化すると Wi-Fi の設定も消えるため、このページとは繋がらなくなります。Bluetooth で設定し直してください。" : "";
   if (!confirm("保存されている設定をすべて消去して再起動します。よろしいですか？" + extra)) return;
