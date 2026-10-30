@@ -5,6 +5,7 @@
 #include "app_config.h"
 #include "esp_chip_info.h"
 #include "esp_system.h"
+#include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -88,6 +89,10 @@ static void send_status(const sink_t *k)
     }
     cJSON_AddStringToObject(o, "status_led", status_led_indicator());
     cJSON_AddNumberToObject(o, "free_heap", esp_get_free_heap_size());
+    // TLS などは内蔵 RAM から取るので、PSRAM とは分けて返す
+    cJSON_AddNumberToObject(o, "free_internal", heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    cJSON_AddNumberToObject(o, "min_free_internal", heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL));
+    cJSON_AddNumberToObject(o, "free_psram", heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
     cJSON_AddNumberToObject(o, "uptime_s", (double)(esp_timer_get_time() / 1000000));
     cJSON_AddStringToObject(o, "reset_reason", logbuf_reset_reason());
     cJSON_AddStringToObject(o, "last_error", logbuf_last_error());

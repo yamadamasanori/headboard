@@ -28,6 +28,10 @@
   .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 16px; }
   @media (max-width: 560px) { .grid { grid-template-columns: 1fr; } }
   label { display: block; font-size: .85rem; color: var(--muted); margin-bottom: 4px; }
+  textarea {
+    width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text);
+    font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; resize: vertical;
+  }
   input[type=text], input[type=password], input[type=number] {
     width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit;
   }
@@ -135,6 +139,12 @@
           <div><label for="mqtt_port">ポート</label><input id="mqtt_port" type="number" min="1" max="65535"></div>
           <div><label for="mqtt_user">ユーザー名</label><input id="mqtt_user" type="text" maxlength="63"></div>
           <div><label for="mqtt_pass">パスワード</label><input id="mqtt_pass" type="password" maxlength="63"></div>
+          <div><label><input id="mqtt_tls" type="checkbox"> TLS で接続する（MQTTS）</label></div>
+        </div>
+        <div id="mqttTlsArea" hidden style="margin-top:12px">
+          <label for="mqtt_ca">CA 証明書（PEM。ブローカーの証明書を自分で作った場合は ca.crt の中身を貼り付ける）</label>
+          <textarea id="mqtt_ca" rows="6" maxlength="2559" spellcheck="false" placeholder="-----BEGIN CERTIFICATE-----&#10;…&#10;-----END CERTIFICATE-----"></textarea>
+          <p class="note">空欄のときは、公開の認証局（Let's Encrypt など）の証明書として確かめます。ブローカーのホスト名 / IP は、証明書に入っている名前・IP のどれかと同じにしてください。違うと接続できません。</p>
         </div>
       </fieldset>
       <fieldset>
@@ -221,7 +231,7 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
-const textFields = ["wifi_ssid", "wifi_pass", "mqtt_host", "mqtt_user", "mqtt_pass", "device_name", "ts_authkey", "ts_hostname"];
+const textFields = ["wifi_ssid", "wifi_pass", "mqtt_host", "mqtt_user", "mqtt_pass", "mqtt_ca", "device_name", "ts_authkey", "ts_hostname"];
 const secretFields = ["wifi_pass", "mqtt_pass", "ts_authkey"];
 const numFields = ["mqtt_port", "pin_reading", "pin_backlight", "pwm_freq", "sled_pin", "sled_brightness", "watt_reading", "watt_backlight"];
 const indicatorNames = {
@@ -581,6 +591,8 @@ function fillForm(c) {
   for (const k of textFields) if (k in c) $(k).value = c[k];
   for (const k of numFields) if (k in c) $(k).value = c[k];
   $("pwm_invert").checked = !!c.pwm_invert;
+  $("mqtt_tls").checked = !!c.mqtt_tls;
+  $("mqttTlsArea").hidden = !c.mqtt_tls;
   $("ts_enabled").checked = !!c.ts_enabled;
   $("sled_always_on").checked = !!c.sled_always_on;
   $("log_verbose").checked = !!c.log_verbose;
@@ -590,15 +602,17 @@ function fillForm(c) {
   }
 }
 
+const kb = (n) => n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : (n / 1024).toFixed(1) + " KB";
 function showStatus(s) {
   const yn = (b) => b ? '<span class="ok">接続中</span>' : '<span class="ng">未接続</span>';
   const up = s.uptime_s !== undefined ? `${Math.floor(s.uptime_s / 3600)}時間${Math.floor(s.uptime_s / 60) % 60}分` : "";
   $("status").innerHTML = `Wi-Fi: ${s.ble_setup ? '<span class="ng">Bluetooth で設定待ち</span>' : yn(s.wifi_connected)}${s.ip ? " (" + s.ip + (s.rssi !== undefined ? ", " + s.rssi + " dBm" : "") + ")" : ""}`
-    + ` ／ MQTT: ${yn(s.mqtt_connected)}${s.mqtt_connected && s.mqtt_addr ? " (" + escapeHtml(s.mqtt_addr) + ")" : ""}`
+    + ` ／ MQTT: ${yn(s.mqtt_connected)}${s.mqtt_connected && s.mqtt_addr ? " (" + escapeHtml(s.mqtt_addr) + (s.mqtt_tls ? "、TLS" : "") + ")" : ""}`
     + (s.tailscale && s.tailscale.enabled ? ` ／ Tailscale: ${yn(s.tailscale.state === "connected")}${s.tailscale.ip ? " (" + s.tailscale.ip + ")" : " (" + s.tailscale.state + ")"}` : "")
     + (!s.mqtt_connected && s.mqtt_error ? `<br><span class="mqtt-err">MQTT: ${escapeHtml(s.mqtt_error)}</span>` : "")
     + (s.status_led ? `<br>状態表示 LED: ${indicatorNames[s.status_led] || s.status_led}` : "")
     + (s.ip && s.hostname ? `<br>本体の設定ページ: <a href="http://${s.hostname}.local/" target="_blank">http://${s.hostname}.local/</a>（つながらないときは <a href="http://${s.ip}/" target="_blank">http://${s.ip}/</a>）` : "")
+    + (s.free_internal !== undefined ? `<br>空きメモリ: 内蔵 RAM ${kb(s.free_internal)}（起動してからの最小 ${kb(s.min_free_internal)}）${s.free_psram ? "、PSRAM " + kb(s.free_psram) : ""}` : "")
     + (up ? `<br>起動してから ${up}（起動の理由: ${escapeHtml(s.reset_reason || "")}）` : "")
     + (s.last_error ? `<br><span class="mqtt-err">最後のエラー: ${escapeHtml(s.last_error)}</span>` : "")
     + (s.prev_error ? `<br><span class="note">前回の起動の最後のエラー: ${escapeHtml(s.prev_error)}</span>` : "")
@@ -618,6 +632,7 @@ $("cfgForm").addEventListener("submit", async (e) => {
   for (const k of secretFields) if (!cfg[k]) delete cfg[k];
   for (const k of numFields) cfg[k] = Number($(k).value);
   cfg.pwm_invert = $("pwm_invert").checked;
+  cfg.mqtt_tls = $("mqtt_tls").checked;
   cfg.ts_enabled = $("ts_enabled").checked;
   cfg.sled_always_on = $("sled_always_on").checked;
   cfg.log_verbose = $("log_verbose").checked;
@@ -628,6 +643,15 @@ $("cfgForm").addEventListener("submit", async (e) => {
       if (mode === "usb") setTimeout(loadAll, 4000);  // 本体ページは再接続したときに読み込み直す
     }
   } catch { showMsg("応答がありません", "err"); }
+});
+
+// TLS を切り替えたら、既定のポート（1883 / 8883）も合わせる。ほかのポートにしていたらそのまま
+$("mqtt_tls").addEventListener("change", () => {
+  const tls = $("mqtt_tls").checked;
+  $("mqttTlsArea").hidden = !tls;
+  const port = $("mqtt_port");
+  if (tls && port.value === "1883") port.value = "8883";
+  if (!tls && port.value === "8883") port.value = "1883";
 });
 
 $("btnReload").addEventListener("click", loadAll);

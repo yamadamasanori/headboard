@@ -1,6 +1,7 @@
 #include "app_config.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "driver/gpio.h"
 #include "esp_efuse.h"
@@ -10,6 +11,7 @@
 #include "esp_random.h"
 #include "esp_wifi.h"
 #include "mbedtls/sha256.h"
+#include "mbedtls/x509_crt.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "usage.h"
@@ -134,17 +136,21 @@ void config_load(void)
         ESP_LOGI(TAG, "no saved config, using defaults");
         return;
     }
+    uint8_t flag = 0;
     load_str(h, "wifi_ssid", g_cfg.wifi_ssid, sizeof(g_cfg.wifi_ssid));
     load_str(h, "wifi_pass", g_cfg.wifi_pass, sizeof(g_cfg.wifi_pass));
     load_str(h, "mqtt_host", g_cfg.mqtt_host, sizeof(g_cfg.mqtt_host));
     load_str(h, "mqtt_user", g_cfg.mqtt_user, sizeof(g_cfg.mqtt_user));
     load_str(h, "mqtt_pass", g_cfg.mqtt_pass, sizeof(g_cfg.mqtt_pass));
+    if (nvs_get_u8(h, "mqtt_tls", &flag) == ESP_OK) {
+        g_cfg.mqtt_tls = flag != 0;
+    }
+    load_str(h, "mqtt_ca", g_cfg.mqtt_ca, sizeof(g_cfg.mqtt_ca));
     load_str(h, "dev_name", g_cfg.device_name, sizeof(g_cfg.device_name));
     nvs_get_u16(h, "mqtt_port", &g_cfg.mqtt_port);
     nvs_get_u8(h, "pin_read", &g_cfg.pin_reading);
     nvs_get_u8(h, "pin_back", &g_cfg.pin_backlight);
     nvs_get_u16(h, "pwm_freq", &g_cfg.pwm_freq);
-    uint8_t flag = 0;
     if (nvs_get_u8(h, "pwm_inv", &flag) == ESP_OK) {
         g_cfg.pwm_invert = flag != 0;
     }
@@ -184,6 +190,8 @@ esp_err_t config_save(void)
     nvs_set_str(h, "mqtt_host", g_cfg.mqtt_host);
     nvs_set_str(h, "mqtt_user", g_cfg.mqtt_user);
     nvs_set_str(h, "mqtt_pass", g_cfg.mqtt_pass);
+    nvs_set_u8(h, "mqtt_tls", g_cfg.mqtt_tls ? 1 : 0);
+    nvs_set_str(h, "mqtt_ca", g_cfg.mqtt_ca);
     nvs_set_str(h, "dev_name", g_cfg.device_name);
     nvs_set_u16(h, "mqtt_port", g_cfg.mqtt_port);
     nvs_set_u8(h, "pin_read", g_cfg.pin_reading);
@@ -263,6 +271,8 @@ void config_to_json(cJSON *o)
     cJSON_AddNumberToObject(o, "mqtt_port", g_cfg.mqtt_port);
     cJSON_AddStringToObject(o, "mqtt_user", g_cfg.mqtt_user);
     cJSON_AddBoolToObject(o, "mqtt_pass_set", g_cfg.mqtt_pass[0] != 0);
+    cJSON_AddBoolToObject(o, "mqtt_tls", g_cfg.mqtt_tls);
+    cJSON_AddStringToObject(o, "mqtt_ca", g_cfg.mqtt_ca);  // 公開してよい情報なので、そのまま返す
     cJSON_AddNumberToObject(o, "pin_reading", g_cfg.pin_reading);
     cJSON_AddNumberToObject(o, "pin_backlight", g_cfg.pin_backlight);
     cJSON_AddNumberToObject(o, "pwm_freq", g_cfg.pwm_freq);
@@ -366,29 +376,50 @@ static bool take_watt(const cJSON *o, const char *key, float *out, char *err, si
     return true;
 }
 
-bool config_from_json(const cJSON *o, char *err, size_t err_len)
+// PEM の CA 証明書として読めるか（1 枚だけ、CA であること）
+static bool valid_ca_pem(const char *pem, char *err, size_t err_len)
 {
-    // 失敗したときに途中まで反映されないよう、コピーに対して適用する
-    app_config_t c = g_cfg;
-    int port = c.mqtt_port, pr = c.pin_reading, pb = c.pin_backlight, freq = c.pwm_freq;
-    int sp = c.sled_pin == STATUS_LED_DISABLED ? -1 : c.sled_pin, sb = c.sled_brightness;
+    if (!strstr(pem, "-----BEGIN CERTIFICATE-----")) {
+        snprintf(err, err_len, "CA 証明書は -----BEGIN CERTIFICATE----- で始まる PEM 形式で入力してください");
+        return false;
+    }
+    mbedtls_x509_crt crt;
+    mbedtls_x509_crt_init(&crt);
+    int r = mbedtls_x509_crt_parse(&crt, (const unsigned char *)pem, strlen(pem) + 1);  // PEM は終端を含めた長さを渡す
+    bool ok = r == 0;
+    if (!ok) {
+        snprintf(err, err_len, "CA 証明書を読み込めません（-0x%04x）。ca.crt の中身をそのまま貼り付けてください", (unsigned)-r);
+    } else if (!crt.MBEDTLS_PRIVATE(ca_istrue)) {
+        // CA でない証明書（サーバー証明書など）を貼ったときに気付けるように
+        snprintf(err, err_len, "CA の証明書ではありません（server.crt ではなく ca.crt を貼り付けてください）");
+        ok = false;
+    }
+    mbedtls_x509_crt_free(&crt);
+    return ok;
+}
 
-    if (!take_str(o, "wifi_ssid", c.wifi_ssid, sizeof(c.wifi_ssid), err, err_len) ||
-        !take_str(o, "wifi_pass", c.wifi_pass, sizeof(c.wifi_pass), err, err_len) ||
-        !take_str(o, "mqtt_host", c.mqtt_host, sizeof(c.mqtt_host), err, err_len) ||
-        !take_str(o, "mqtt_user", c.mqtt_user, sizeof(c.mqtt_user), err, err_len) ||
-        !take_str(o, "mqtt_pass", c.mqtt_pass, sizeof(c.mqtt_pass), err, err_len) ||
-        !take_str(o, "device_name", c.device_name, sizeof(c.device_name), err, err_len) ||
-        !take_str(o, "ts_authkey", c.ts_authkey, sizeof(c.ts_authkey), err, err_len) ||
-        !take_str(o, "ts_hostname", c.ts_hostname, sizeof(c.ts_hostname), err, err_len) ||
+static bool apply_json(app_config_t *c, const cJSON *o, char *err, size_t err_len)
+{
+    int port = c->mqtt_port, pr = c->pin_reading, pb = c->pin_backlight, freq = c->pwm_freq;
+    int sp = c->sled_pin == STATUS_LED_DISABLED ? -1 : c->sled_pin, sb = c->sled_brightness;
+
+    if (!take_str(o, "wifi_ssid", c->wifi_ssid, sizeof(c->wifi_ssid), err, err_len) ||
+        !take_str(o, "wifi_pass", c->wifi_pass, sizeof(c->wifi_pass), err, err_len) ||
+        !take_str(o, "mqtt_host", c->mqtt_host, sizeof(c->mqtt_host), err, err_len) ||
+        !take_str(o, "mqtt_user", c->mqtt_user, sizeof(c->mqtt_user), err, err_len) ||
+        !take_str(o, "mqtt_pass", c->mqtt_pass, sizeof(c->mqtt_pass), err, err_len) ||
+        !take_str(o, "mqtt_ca", c->mqtt_ca, sizeof(c->mqtt_ca), err, err_len) ||
+        !take_str(o, "device_name", c->device_name, sizeof(c->device_name), err, err_len) ||
+        !take_str(o, "ts_authkey", c->ts_authkey, sizeof(c->ts_authkey), err, err_len) ||
+        !take_str(o, "ts_hostname", c->ts_hostname, sizeof(c->ts_hostname), err, err_len) ||
         !take_int(o, "mqtt_port", 1, 65535, &port, err, err_len) ||
         !take_int(o, "pin_reading", 0, 48, &pr, err, err_len) ||
         !take_int(o, "pin_backlight", 0, 48, &pb, err, err_len) ||
         !take_int(o, "pwm_freq", 100, 20000, &freq, err, err_len) ||
         !take_int(o, "sled_pin", -1, 48, &sp, err, err_len) ||
         !take_int(o, "sled_brightness", 1, 255, &sb, err, err_len) ||
-        !take_watt(o, "watt_reading", &c.watt_reading, err, err_len) ||
-        !take_watt(o, "watt_backlight", &c.watt_backlight, err, err_len)) {
+        !take_watt(o, "watt_reading", &c->watt_reading, err, err_len) ||
+        !take_watt(o, "watt_backlight", &c->watt_backlight, err, err_len)) {
         return false;
     }
     if (!valid_output_pin(pr) || !valid_output_pin(pb)) {
@@ -403,13 +434,13 @@ bool config_from_json(const cJSON *o, char *err, size_t err_len)
         snprintf(err, err_len, "読書灯とバックライトに同じ GPIO は使えません");
         return false;
     }
-    if (!c.device_name[0]) {
+    if (!c->device_name[0]) {
         snprintf(err, err_len, "device_name を入力してください");
         return false;
     }
-    const char *bool_keys[] = {"pwm_invert", "ts_enabled", "sled_always_on", "log_verbose"};
-    bool *bool_dst[] = {&c.pwm_invert, &c.ts_enabled, &c.sled_always_on, &c.log_verbose};
-    for (int i = 0; i < 4; i++) {
+    const char *bool_keys[] = {"pwm_invert", "ts_enabled", "sled_always_on", "log_verbose", "mqtt_tls"};
+    bool *bool_dst[] = {&c->pwm_invert, &c->ts_enabled, &c->sled_always_on, &c->log_verbose, &c->mqtt_tls};
+    for (int i = 0; i < 5; i++) {
         const cJSON *v = cJSON_GetObjectItemCaseSensitive(o, bool_keys[i]);
         if (!v) {
             continue;
@@ -420,27 +451,54 @@ bool config_from_json(const cJSON *o, char *err, size_t err_len)
         }
         *bool_dst[i] = cJSON_IsTrue(v);
     }
-    if (!valid_hostname(c.ts_hostname)) {
+    // 貼り付けたときの前後の空白や改行は除く（中の改行は PEM に必要なので残す）
+    char *ca = c->mqtt_ca;
+    size_t lead = strspn(ca, " \t\r\n");
+    memmove(ca, ca + lead, strlen(ca + lead) + 1);
+    for (size_t n = strlen(ca); n > 0 && strchr(" \t\r\n", ca[n - 1]); n--) {
+        ca[n - 1] = 0;
+    }
+    if (ca[0] && !valid_ca_pem(ca, err, err_len)) {
+        return false;
+    }
+    if (!valid_hostname(c->ts_hostname)) {
         snprintf(err, err_len, "ts_hostname は英小文字・数字・- だけで入力してください");
         return false;
     }
-    if (c.ts_authkey[0] && strncmp(c.ts_authkey, "tskey-", 6) != 0) {
+    if (c->ts_authkey[0] && strncmp(c->ts_authkey, "tskey-", 6) != 0) {
         snprintf(err, err_len, "Tailscale の認証キーは tskey- で始まります");
         return false;
     }
-    if (c.ts_enabled && !c.ts_authkey[0]) {
+    if (c->ts_enabled && !c->ts_authkey[0]) {
         snprintf(err, err_len, "Tailscale を使うには認証キーを入力してください");
         return false;
     }
-    if (strcmp(c.ts_authkey, g_cfg.ts_authkey) != 0 || strcmp(c.ts_hostname, g_cfg.ts_hostname) != 0) {
+    if (strcmp(c->ts_authkey, g_cfg.ts_authkey) != 0 || strcmp(c->ts_hostname, g_cfg.ts_hostname) != 0) {
         set_ts_reset_flag();  // 新しいキーで登録し直す
     }
-    c.mqtt_port = port;
-    c.pin_reading = pr;
-    c.pin_backlight = pb;
-    c.pwm_freq = freq;
-    c.sled_pin = sp < 0 ? STATUS_LED_DISABLED : sp;
-    c.sled_brightness = sb;
-    g_cfg = c;
+    c->mqtt_port = port;
+    c->pin_reading = pr;
+    c->pin_backlight = pb;
+    c->pwm_freq = freq;
+    c->sled_pin = sp < 0 ? STATUS_LED_DISABLED : sp;
+    c->sled_brightness = sb;
     return true;
+}
+
+bool config_from_json(const cJSON *o, char *err, size_t err_len)
+{
+    // 失敗したときに途中まで反映されないよう、コピーに対して適用する。
+    // 設定は CA 証明書を含めて数 KB あるので、スタックの小さいタスクから呼んでも溢れないようヒープに置く
+    app_config_t *c = malloc(sizeof(*c));
+    if (!c) {
+        snprintf(err, err_len, "メモリが足りません");
+        return false;
+    }
+    *c = g_cfg;
+    bool ok = apply_json(c, o, err, err_len);
+    if (ok) {
+        g_cfg = *c;
+    }
+    free(c);
+    return ok;
 }

@@ -24,7 +24,7 @@
 static const char *TAG = "webui";
 
 #define MAX_CLIENTS      4
-#define WS_MAX_IN        2048
+#define WS_MAX_IN        4096    // 設定の保存（CA 証明書を含む）が入る大きさ
 #define LOG_CHUNK        2048
 #define LOG_HDR          9       // 0x00 + 位置 8 バイト
 #define LOG_CHUNKS_MAX   4       // 1 回の送信で送る最大チャンク数（他の処理を待たせないため）

@@ -96,6 +96,8 @@ static const entity_t ENTITIES[] = {
     {"sensor", "prev_error", "前回の起動の最後のエラー", CAT_DIAG, WHEN_ALWAYS, OR_NONE("prev_error"), NULL, NULL, NULL, -1, "mdi:alert-circle-outline"},
     {"sensor", "free_heap", "空きメモリ", CAT_DIAG, WHEN_ALWAYS, V("free_heap"), "data_size", "B", "measurement", 0, NULL},
     {"sensor", "min_free_heap", "空きメモリの最小値", CAT_DIAG, WHEN_ALWAYS, V("min_free_heap"), "data_size", "B", "measurement", 0, NULL},
+    {"sensor", "free_internal", "内蔵 RAM の空き", CAT_DIAG, WHEN_ALWAYS, V("free_internal"), "data_size", "B", "measurement", 0, NULL},
+    {"sensor", "min_free_internal", "内蔵 RAM の空きの最小値", CAT_DIAG, WHEN_ALWAYS, V("min_free_internal"), "data_size", "B", "measurement", 0, NULL},
     {"sensor", "free_psram", "PSRAM の空き", CAT_DIAG, WHEN_ALWAYS, V("free_psram"), "data_size", "B", "measurement", 0, NULL},
     {"sensor", "temperature", "チップの温度", CAT_DIAG, WHEN_ALWAYS, V("temperature"), "temperature", "°C", "measurement", 1, NULL},
     {"sensor", "status_led", "状態表示 LED の表示", CAT_DIAG, WHEN_ALWAYS, V("status_led"), NULL, NULL, NULL, -1, "mdi:led-on"},
@@ -240,6 +242,8 @@ static void publish_diag(void)
     cJSON_AddStringToObject(o, "prev_error", logbuf_prev_error());
     cJSON_AddNumberToObject(o, "free_heap", esp_get_free_heap_size());
     cJSON_AddNumberToObject(o, "min_free_heap", esp_get_minimum_free_heap_size());
+    cJSON_AddNumberToObject(o, "free_internal", heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    cJSON_AddNumberToObject(o, "min_free_internal", heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL));
     cJSON_AddNumberToObject(o, "free_psram", heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
     float temp;
     if (s_tsens && temperature_sensor_get_celsius(s_tsens, &temp) == ESP_OK) {

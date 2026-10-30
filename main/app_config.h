@@ -6,9 +6,10 @@
 #include "cJSON.h"
 #include "esp_err.h"
 
-#define FW_VERSION "2.1.3"
+#define FW_VERSION "2.2.0"
 
 #define STATUS_LED_DISABLED 0xFF
+#define MQTT_CA_MAX 2560      // CA 証明書（PEM）の最大の長さ（終端を含む）。RSA 4096 bit の証明書まで入る
 
 typedef struct {
     char wifi_ssid[33];
@@ -17,6 +18,8 @@ typedef struct {
     uint16_t mqtt_port;
     char mqtt_user[64];
     char mqtt_pass[64];
+    bool mqtt_tls;          // TLS で接続する（MQTTS、既定のポートは 8883）
+    char mqtt_ca[MQTT_CA_MAX];  // ブローカーの証明書を確かめる CA 証明書（PEM）。空なら公開の認証局で確かめる
     char device_name[48];   // Home Assistant に表示されるデバイス名
     uint8_t pin_reading;    // 読書灯の GPIO
     uint8_t pin_backlight;  // バックライトの GPIO

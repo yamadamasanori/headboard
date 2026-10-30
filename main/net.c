@@ -8,6 +8,8 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_tls_errors.h"
+#include "esp_crt_bundle.h"
+#include "mbedtls/x509.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
@@ -180,8 +182,20 @@ static void record_mqtt_error(const esp_mqtt_error_codes_t *e)
     }
     int err = e->esp_tls_last_esp_err;
     int sock = e->esp_transport_sock_errno;
-    ESP_LOGW(TAG, "MQTT transport error: esp_err=0x%x, errno=%d (%s)", err, sock, sock ? strerror(sock) : "-");
-    if (err == ESP_ERR_ESP_TLS_CANNOT_RESOLVE_HOSTNAME) {
+    int vflags = e->esp_tls_cert_verify_flags;
+    ESP_LOGW(TAG, "MQTT transport error: esp_err=0x%x, tls=-0x%x, verify=0x%x, errno=%d (%s)", err,
+             (unsigned)-e->esp_tls_stack_err, (unsigned)vflags, sock, sock ? strerror(sock) : "-");
+    if (vflags & MBEDTLS_X509_BADCERT_CN_MISMATCH) {
+        set_mqtt_error("ブローカーの証明書に「%s」が入っていません。証明書を作ったときの名前・IP で指定してください", g_cfg.mqtt_host);
+    } else if (vflags & MBEDTLS_X509_BADCERT_NOT_TRUSTED) {
+        set_mqtt_error(g_cfg.mqtt_ca[0] ? "ブローカーの証明書が、設定した CA 証明書で確かめられません。ca.crt を貼り直してください"
+                                        : "ブローカーの証明書を確かめられません。自分で作った証明書なら、CA 証明書（ca.crt）を設定してください");
+    } else if (vflags) {
+        set_mqtt_error("ブローカーの証明書を確かめられません（0x%x）", (unsigned)vflags);
+    } else if (g_cfg.mqtt_tls && (err == ESP_ERR_MBEDTLS_SSL_HANDSHAKE_FAILED || err == ESP_ERR_ESP_TLS_FAILED_CONNECT_TO_HOST)
+               && sock == 0) {
+        set_mqtt_error("%s:%u と TLS で接続できません。TLS 用のポート（通常は 8883）か確認してください", s_mqtt_addr, g_cfg.mqtt_port);
+    } else if (err == ESP_ERR_ESP_TLS_CANNOT_RESOLVE_HOSTNAME) {
         set_mqtt_error("ホスト名「%s」を IP アドレスに変換できません。IP アドレスで指定してみてください", s_mqtt_addr);
     } else if (sock == ECONNREFUSED) {
         set_mqtt_error("%s:%u に接続を断られました。ポート番号が違うか、ブローカーが動いていません", s_mqtt_addr, g_cfg.mqtt_port);
@@ -263,7 +277,12 @@ static void mqtt_start(void)
     esp_mqtt_client_config_t cfg = {
         .broker.address.hostname = s_mqtt_addr,
         .broker.address.port = g_cfg.mqtt_port,
-        .broker.address.transport = MQTT_TRANSPORT_OVER_TCP,
+        .broker.address.transport = g_cfg.mqtt_tls ? MQTT_TRANSPORT_OVER_SSL : MQTT_TRANSPORT_OVER_TCP,
+        // 証明書の確認。自分で作った CA があればそれで、なければ公開の認証局（証明書バンドル）で確かめる。
+        // 照合する名前は、設定に書いたもの（tailnet の名前を IP に変換していても、元の名前で照合する）
+        .broker.verification.certificate = g_cfg.mqtt_tls && g_cfg.mqtt_ca[0] ? g_cfg.mqtt_ca : NULL,
+        .broker.verification.crt_bundle_attach = g_cfg.mqtt_tls && !g_cfg.mqtt_ca[0] ? esp_crt_bundle_attach : NULL,
+        .broker.verification.common_name = g_cfg.mqtt_tls ? g_cfg.mqtt_host : NULL,
         .credentials.client_id = config_device_id(),
         .credentials.username = g_cfg.mqtt_user[0] ? g_cfg.mqtt_user : NULL,
         .credentials.authentication.password = g_cfg.mqtt_pass[0] ? g_cfg.mqtt_pass : NULL,
@@ -278,7 +297,7 @@ static void mqtt_start(void)
     s_mqtt = esp_mqtt_client_init(&cfg);
     esp_mqtt_client_register_event(s_mqtt, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL);
     esp_mqtt_client_start(s_mqtt);
-    ESP_LOGI(TAG, "MQTT connecting to %s:%u", s_mqtt_addr, g_cfg.mqtt_port);
+    ESP_LOGI(TAG, "MQTT connecting to %s:%u%s", s_mqtt_addr, g_cfg.mqtt_port, g_cfg.mqtt_tls ? " (TLS)" : "");
     set_mqtt_error("%s:%u に接続しています…", s_mqtt_addr, g_cfg.mqtt_port);
 }
 
@@ -388,6 +407,7 @@ void net_status_to_json(cJSON *o)
     }
     cJSON_AddStringToObject(o, "ip", ip);
     cJSON_AddBoolToObject(o, "mqtt_connected", s_mqtt_up);
+    cJSON_AddBoolToObject(o, "mqtt_tls", g_cfg.mqtt_tls);
     char addr[80] = "";
     if (s_mqtt_addr[0]) {
         snprintf(addr, sizeof(addr), "%s:%u", s_mqtt_addr, g_cfg.mqtt_port);

@@ -1,6 +1,6 @@
 {
   "name": "ヘッドボードLED",
-  "version": "2.1.3",
+  "version": "2.2.0",
   "new_install_prompt_erase": true,
   "builds": [
     {

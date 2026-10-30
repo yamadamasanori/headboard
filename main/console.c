@@ -12,7 +12,7 @@
 #include "freertos/task.h"
 
 #define CONSOLE_UART CONFIG_ESP_CONSOLE_UART_NUM
-#define CMD_LINE_MAX     1024
+#define CMD_LINE_MAX     4096    // 設定の保存（CA 証明書を含む）が入る大きさ
 
 static const char *TAG = "console";
 
