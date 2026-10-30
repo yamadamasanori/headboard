@@ -28,6 +28,7 @@ static const char *TAG = "ha";
 #define CHECK_INTERVAL_US (6LL * 3600 * 1000000)   // 新しい版を探す間隔
 #define IDENTIFY_MS       10000
 #define UPDATE_URL        CONFIG_HEADBOARD_UPDATE_URL
+#define RELEASE_URL       CONFIG_HEADBOARD_RELEASE_URL
 #define OTA_FILE          "firmware/headboard-led-ota.bin"
 
 // ha_task への依頼
@@ -187,7 +188,6 @@ static void publish_entity(const entity_t *e)
         cJSON_AddStringToObject(o, "state_topic", buf);
         cJSON_AddStringToObject(o, "payload_install", "install");
         cJSON_AddStringToObject(o, "title", "ヘッドボードLED");
-        cJSON_AddStringToObject(o, "release_url", UPDATE_URL);
     }
     if (strcmp(e->component, "button") == 0 || strcmp(e->component, "number") == 0 ||
         strcmp(e->component, "switch") == 0 || strcmp(e->component, "update") == 0) {
@@ -270,6 +270,12 @@ static void publish_update_state(void)
         cJSON_AddStringToObject(o, "latest_version", s_latest);
     } else {
         cJSON_AddNullToObject(o, "latest_version");  // まだ分からない
+    }
+    if (RELEASE_URL[0]) {
+        // 最新の版のお知らせ（分からなければ今の版）。版が変わるので状態と一緒に送る
+        char url[160];
+        snprintf(url, sizeof(url), "%s%s", RELEASE_URL, s_latest[0] ? s_latest : FW_VERSION);
+        cJSON_AddStringToObject(o, "release_url", url);
     }
     cJSON_AddBoolToObject(o, "in_progress", s_installing);
     if (s_installing && s_progress >= 0) {

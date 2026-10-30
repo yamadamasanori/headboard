@@ -129,6 +129,7 @@ static void led_task(void *arg)
 
     int64_t ok_since_ms = -1;
     rgb_t last = {1, 2, 3};
+    uint8_t last_brightness = 0;
     TickType_t wake = xTaskGetTickCount();
     for (;;) {
         vTaskDelayUntil(&wake, pdMS_TO_TICKS(TICK_MS));
@@ -155,8 +156,11 @@ static void led_task(void *arg)
         if (now_us < s_identify_until_us) {
             out = blink_on(PAT_BLINK_FAST, now_ms) ? C_WHITE : C_BLACK;
         }
-        if (memcmp(&out, &last, sizeof(out)) != 0 && show(out)) {
+        // 明るさは Home Assistant から再起動せずに変えられるので、色が同じでも送り直す
+        uint8_t brightness = g_cfg.sled_brightness;
+        if ((memcmp(&out, &last, sizeof(out)) != 0 || brightness != last_brightness) && show(out)) {
             last = out;
+            last_brightness = brightness;
         }
     }
 }

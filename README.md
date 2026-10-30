@@ -204,7 +204,7 @@ Home Assistant に MQTT 統合が設定されていれば、「設定 → デバ
 | `headboard/<id>/reading/state`、`.../backlight/state` | ESP32 → HA | `{"state":"ON","brightness":128,"color_mode":"brightness"}`（retain） |
 | `homeassistant/<sensor など>/<id>/<key>/config` | ESP32 → HA | 診断・累計・操作・更新のエンティティの自動探索の設定（retain）。使わなくなったもの（Tailscale をオフにしたときなど）は空のメッセージで消す |
 | `headboard/<id>/diag` | ESP32 → HA | 診断と累計をまとめた JSON（60 秒ごと、retain）。各エンティティは `value_template` でここから値を取り出す |
-| `headboard/<id>/update` | ESP32 → HA | `{"installed_version":"2.1.0","latest_version":"2.1.1","in_progress":false,"update_percentage":null}`（retain） |
+| `headboard/<id>/update` | ESP32 → HA | `{"installed_version":"2.1.1","latest_version":"2.1.2","release_url":"https://github.com/yamadamasanori/headboard/releases/tag/v2.1.2","in_progress":false,"update_percentage":null}`（retain）。`release_url` は HA の「リリースのお知らせを読む」のリンク |
 | `headboard/<id>/restart/set`、`.../identify/set`、`.../reset_usage/set` | HA → ESP32 | ボタン（内容は何でもよい） |
 | `headboard/<id>/sled_brightness/set` | HA → ESP32 | `1`〜`255` |
 | `headboard/<id>/sled_always_on/set`、`.../log_verbose/set` | HA → ESP32 | `ON` / `OFF`（本体に保存し、すぐに反映） |

@@ -17,4 +17,11 @@ config HEADBOARD_UPDATE_URL
         「更新」から書き込めるようにします。空にすると、この機能を使いません。
         HTTPS で取得し、サーバーの証明書を確かめます。
 
+config HEADBOARD_RELEASE_URL
+    string "リリースのお知らせの URL（版の前まで）"
+    default "https://github.com/yamadamasanori/headboard/releases/tag/v"
+    help
+        末尾に版（2.1.2 など）を付けた URL を、Home Assistant の更新の
+        「リリースのお知らせを読む」に表示します。空にすると表示しません。
+
 endmenu
