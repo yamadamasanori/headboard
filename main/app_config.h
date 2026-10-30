@@ -6,7 +6,7 @@
 #include "cJSON.h"
 #include "esp_err.h"
 
-#define FW_VERSION "2.1.2"
+#define FW_VERSION "2.1.3"
 
 #define STATUS_LED_DISABLED 0xFF
 

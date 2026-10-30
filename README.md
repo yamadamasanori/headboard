@@ -181,7 +181,7 @@ Home Assistant に MQTT 統合が設定されていれば、「設定 → デバ
 | ライトの累計 | 読書灯・バックライトそれぞれの点灯時間、点灯回数、消費電力（推定）、電力量（推定） |
 | 診断 | Wi-Fi の電波の強さ・SSID・アクセスポイント・チャンネル、IP アドレス、稼働時間、前回の再起動の理由、前回の再起動が異常か（電圧低下・クラッシュ・ウォッチドッグ）、直前のエラー、前回の起動の最後のエラー、空きメモリ（今と最小値）、PSRAM の空き、チップの温度、状態表示 LED の表示、起動した回数、電圧低下による再起動の回数、クラッシュによる再起動の回数、Wi-Fi が切れた回数、MQTT の再接続の回数 |
 | 診断（Tailscale を使うときだけ） | Tailscale の状態・IP アドレス・ピアの数・認証エラー |
-| 操作 | 再起動、本体を光らせる（状態表示 LED が白で 10 秒速く点滅）、累計をクリア（設定は残る。誤操作を避けるため最初は無効で、使うときはデバイスのページで有効にする）、状態表示 LED の明るさ、状態表示 LED を常に点灯、詳細ログ |
+| 操作 | 再起動、本体を光らせる（状態表示 LED が白で 10 秒速く点滅）、更新を確認（配布元の新しい版をすぐに確かめる。配布元を設定したときだけ）、累計をクリア（設定は残る。誤操作を避けるため最初は無効で、使うときはデバイスのページで有効にする）、状態表示 LED の明るさ、状態表示 LED を常に点灯、詳細ログ |
 | 更新 | ファームウェア（新しい版があると「設定 → 更新」に出て、そこから書き込める） |
 
 - 値は 60 秒ごと（と、操作したとき・MQTT に繋がったとき）に送ります
@@ -189,7 +189,7 @@ Home Assistant に MQTT 統合が設定されていれば、「設定 → デバ
 - 点灯時間・点灯回数・電力量・起動回数などの累計は、本体に 10 分ごと（と意図した再起動の前）に保存し、再起動しても続きから数えます。電源を急に切ると、最後の保存から後の分（最大 10 分）は残りません
 - 累計は工場出荷時に戻すか、設定ページか Home Assistant の「累計をクリア」で 0 に戻ります（「累計をクリア」では設定は残ります）。量産時の検査で増えた分は、出荷前に消してください
 - Wi-Fi が切れた回数と MQTT の再接続の回数は、起動してからの回数です（Home Assistant の履歴で長期の傾向を見られます）
-- 新しい版は、本体が 6 時間ごとに配布元（既定は `https://yamadamasanori.github.io/headboard/`、`idf.py menuconfig` の「ヘッドボードLED → ファームウェアの配布元」で変更、空にすると使わない）の `manifest.json` を見て探します。HTTPS でサーバーの証明書を確かめてから取得します
+- 新しい版は、本体が MQTT につないだときと 6 時間ごと（と HA の「更新を確認」ボタンを押したとき）に配布元（既定は `https://yamadamasanori.github.io/headboard/`、`idf.py menuconfig` の「ヘッドボードLED → ファームウェアの配布元」で変更、空にすると使わない）の `manifest.json` を見て探します。HTTPS でサーバーの証明書を確かめてから取得します。GitHub に push してから Pages に公開され、キャッシュが切れるまで 10 分ほどかかります
 - 設定用コード・パスワード・Tailscale の認証キーは MQTT に送りません
 
 ## MQTT の仕様
@@ -205,7 +205,7 @@ Home Assistant に MQTT 統合が設定されていれば、「設定 → デバ
 | `homeassistant/<sensor など>/<id>/<key>/config` | ESP32 → HA | 診断・累計・操作・更新のエンティティの自動探索の設定（retain）。使わなくなったもの（Tailscale をオフにしたときなど）は空のメッセージで消す |
 | `headboard/<id>/diag` | ESP32 → HA | 診断と累計をまとめた JSON（60 秒ごと、retain）。各エンティティは `value_template` でここから値を取り出す |
 | `headboard/<id>/update` | ESP32 → HA | `{"installed_version":"2.1.1","latest_version":"2.1.2","release_url":"https://github.com/yamadamasanori/headboard/releases/tag/v2.1.2","in_progress":false,"update_percentage":null}`（retain）。`release_url` は HA の「リリースのお知らせを読む」のリンク |
-| `headboard/<id>/restart/set`、`.../identify/set`、`.../reset_usage/set` | HA → ESP32 | ボタン（内容は何でもよい） |
+| `headboard/<id>/restart/set`、`.../identify/set`、`.../check_update/set`、`.../reset_usage/set` | HA → ESP32 | ボタン（内容は何でもよい） |
 | `headboard/<id>/sled_brightness/set` | HA → ESP32 | `1`〜`255` |
 | `headboard/<id>/sled_always_on/set`、`.../log_verbose/set` | HA → ESP32 | `ON` / `OFF`（本体に保存し、すぐに反映） |
 | `headboard/<id>/update/set` | HA → ESP32 | `install` で配布元の新しい版を書き込んで再起動 |

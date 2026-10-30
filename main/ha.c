@@ -36,6 +36,7 @@ static const char *TAG = "ha";
 #define REQ_CHECK     (1u << 1)
 #define REQ_INSTALL   (1u << 2)
 #define REQ_RESTART   (1u << 3)
+#define REQ_CHECK_NOW (1u << 4)   // 「更新を確認」ボタン（前回の確認からの時間によらず確かめる）
 
 static TaskHandle_t s_task;
 static esp_mqtt_client_handle_t s_mqtt;
@@ -121,6 +122,7 @@ static const entity_t ENTITIES[] = {
     // 操作（command_topic は <base>/<key>/set）
     {"button", "restart", "再起動", CAT_CONFIG, WHEN_ALWAYS, NULL, "restart", NULL, NULL, -1, NULL},
     {"button", "identify", "本体を光らせる", CAT_CONFIG, WHEN_ALWAYS, NULL, "identify", NULL, NULL, -1, NULL},
+    {"button", "check_update", "更新を確認", CAT_CONFIG, WHEN_UPDATE, NULL, NULL, NULL, NULL, -1, "mdi:cloud-refresh"},
     {"button", "reset_usage", "累計をクリア", CAT_CONFIG_OFF, WHEN_ALWAYS, NULL, NULL, NULL, NULL, -1, "mdi:counter"},
     {"number", "sled_brightness", "状態表示 LED の明るさ", CAT_CONFIG, WHEN_ALWAYS, V("cfg.sled_brightness"), NULL, NULL, NULL, -1, "mdi:brightness-6"},
     {"switch", "sled_always_on", "状態表示 LED を常に点灯", CAT_CONFIG, WHEN_ALWAYS, ON_OFF("cfg.sled_always_on"), NULL, NULL, NULL, -1, "mdi:led-on"},
@@ -449,7 +451,8 @@ static void ha_task(void *arg)
             continue;
         }
         int64_t now = esp_timer_get_time();
-        if (UPDATE_URL[0] && (((req & REQ_CHECK) && !checked) || now - last_check_us >= CHECK_INTERVAL_US)) {
+        if (UPDATE_URL[0] && (((req & REQ_CHECK) && !checked) || (req & REQ_CHECK_NOW) ||
+                              now - last_check_us >= CHECK_INTERVAL_US)) {
             check_latest();
             checked = true;
             last_check_us = now;
@@ -541,6 +544,8 @@ bool ha_handle_message(const char *topic, const char *data, int len)
         request(REQ_RESTART);
     } else if (strcmp(key, "identify") == 0) {
         status_led_identify(IDENTIFY_MS);
+    } else if (strcmp(key, "check_update") == 0) {
+        request(REQ_CHECK_NOW);
     } else if (strcmp(key, "reset_usage") == 0) {
         usage_reset();
         request(REQ_PUBLISH);
