@@ -439,7 +439,7 @@ static esp_err_t h_ota(httpd_req_t *req)
         esp_err_t err = esp_ota_end(ota);
         ota = 0;
         if (err == ESP_ERR_OTA_VALIDATE_FAILED) {
-            fail = "ファームウェアが壊れています（検証に失敗しました）";
+            fail = "ファームウェアを確かめられません。正しい署名がないか、壊れています（公式の配布元のファイルを使ってください）";
         } else if (err != ESP_OK || esp_ota_set_boot_partition(part) != ESP_OK) {
             fail = "書き込みの仕上げに失敗しました";
         }

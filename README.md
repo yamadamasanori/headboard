@@ -21,6 +21,7 @@
 | `partitions.csv` | フラッシュの区画（ファームウェア 4MB × 2 の OTA 構成） |
 | `components/microlink/` | Tailscale クライアント MicroLink（MIT、コミット 216da33 を同梱。認証失敗の検出と定期ログを減らすための小さな変更あり、`VERSION` 参照） |
 | `sdkconfig.defaults*` | ビルド設定（共通 / ESP32-S3 用） |
+| `keys/headboard-signing-pubkey.pem` | ファームウェアの署名を確かめる公開鍵（秘密鍵はリポジトリに入れない。「ファームウェアの署名」参照） |
 | `web/index.html` | 書き込み・設定ページ。本体にも組み込まれ、本体の設定ページとしても使われる |
 | `web/firmware/headboard-led.bin` | ビルド済みファームウェア（ESP32-S3 用、アドレス 0 から書き込む一体型イメージ。USB での書き込み用） |
 | `web/firmware/headboard-led-ota.bin` | 同じファームウェアの更新用イメージ（本体の設定ページからの更新用） |
@@ -29,9 +30,9 @@
 | `web/vendor/qrcode-generator/` | QR Code Generator 2.0.4（MIT）。本体ラベルの QR コード用 |
 | `tools/serve.py` | 設定ページをローカルで開くための簡易サーバー |
 | `.devcontainer/` | VS Code の devcontainer 設定（ESP-IDF v5.3.1 のイメージを使用） |
-| `tools/build.sh` | ESP-IDF 環境でビルドして `web/` を更新（docker は使わない） |
+| `tools/build.sh` | ESP-IDF 環境でビルド・署名して `web/` を更新（docker は使わない。署名用の秘密鍵が必要） |
 | `tools/package_web.py` | ビルド結果を `web/firmware/` にまとめ、ライセンス表示を `web/` にコピーする |
-| `.github/workflows/pages.yml` | GitHub に置いた場合に、ビルドして GitHub Pages に公開する設定 |
+| `.github/workflows/pages.yml` | GitHub に置いた場合に、`web/` を GitHub Pages に公開する設定（ビルドはせず、ファームウェアの署名を確かめてから公開） |
 | `platformio.ini` | PlatformIO でビルドする場合の設定 |
 | `LICENSE` | このプロジェクトのライセンス（MIT） |
 | `THIRD_PARTY_NOTICES.md` | 同梱・組み込みしている第三者のソフトウェアのライセンス |
@@ -94,7 +95,7 @@ LED の色が変わったところで離すと、その動作をします。
 Web Serial は HTTPS か localhost でしか動かないため、HTML ファイルを直接開かずに、次のどちらかで書き込み用のページを開きます。
 
 - devcontainer の中で `python tools/serve.py` を実行し（8000 番は自動で転送されます）、ホストの Chrome か Edge で http://localhost:8000 を開く
-- GitHub のリポジトリに置き、GitHub Pages を有効にする（`.github/workflows/pages.yml` が自動でビルドして公開します）
+- GitHub のリポジトリに置き、GitHub Pages を有効にする（`.github/workflows/pages.yml` が `web/` を自動で公開します）
 
 基板を USB で繋ぎ、「ESP32 に書き込む」を押してシリアルポートを選びます。初回は「消去」を選んでください。
 COM 端子でポートが表示されないときは、USB シリアル変換チップ（CH340 / CH343 / CP210x）のドライバを入れてください。書き込みが始まらないときは、BOOT ボタンを押したまま RST ボタンを押して離し、書き込みモードにしてから試してください。
@@ -143,6 +144,7 @@ MQTT ブローカー（Home Assistant の Mosquitto アドオンなど）のア�
 
 - 新しいファームウェアが起動して Wi-Fi に繋がるまで（Wi-Fi 未設定なら起動するまで）に失敗すると、次の起動で前の版に自動で戻ります
 - `headboard-led.bin`（USB 用の一体型イメージ）や ESP32-S3 用でないファイルは、書き込む前に断ります
+- 2.3.0 からは、正しい鍵で署名したファームウェアだけを書き込みます（Home Assistant からの更新も同じ）。署名がないものや違う鍵のものは、書き込みの最後で断り、今の版のまま動き続けます。2.2.0 以前から 2.3.0 への更新は、まだ署名を確かめない版からなので、そのまま入ります
 
 Home Assistant の「設定 → 更新」からも更新できます（下の「6. Home Assistant で確認する」）。
 
@@ -249,9 +251,26 @@ VS Code で「Reopen in Container」を選び、コンテナの中で次を実�
 sh tools/build.sh
 ```
 
-`web/firmware/`（USB 用の `headboard-led.bin` と更新用の `headboard-led-ota.bin`）と `web/manifest.json` も更新されます。`build.sh` は `idf.py set-target` で `sdkconfig` を作り直すので、`menuconfig` で開発用の設定をオンにしたときは、`build.sh` ではなく `idf.py build` のあとに `python tools/package_web.py` を実行してください。
+`web/firmware/`（USB 用の `headboard-led.bin` と更新用の `headboard-led-ota.bin`）と `web/manifest.json` も更新されます。署名用の秘密鍵（`secrets/headboard-signing-key.pem`）がないとビルドできません。`build.sh` は `idf.py set-target` で `sdkconfig` を作り直すので、`menuconfig` で開発用の設定をオンにしたときは、`build.sh` ではなく `idf.py build` のあとに `python tools/package_web.py` を実行してください。
 
 PlatformIO（`platformio.ini`）の設定は残していますが、動作確認をしていない補助的な経路です。
+
+### ファームウェアの署名
+
+ファームウェアは RSA-3072 の鍵で署名しています（ESP-IDF の「Secure Boot なしの署名付きアプリ」。eFuse は書き込まないので元に戻せます）。本体は無線での更新（本体の設定ページ・Home Assistant）のときに、今動いている版と同じ鍵で署名されているかを確かめ、違えば書き込みません。設定用コードが漏れても、配布元（GitHub）が乗っ取られても、偽のファームウェアは入りません。
+
+- 秘密鍵は `secrets/headboard-signing-key.pem`（`.gitignore` 済み）。**リポジトリにも GitHub にも置かず、別の場所（パスワードマネージャー、暗号化した USB メモリなど）にバックアップしてください**
+- 秘密鍵をなくすと、出荷済みの本体を無線で更新できなくなります（USB で書き直せば、新しい鍵の版に移れます）
+- 秘密鍵が漏れたら、新しい鍵を作り、すべての本体を USB で書き直してください
+- 公開鍵は `keys/headboard-signing-pubkey.pem`。GitHub Actions は、公開する前にこの公開鍵で `web/firmware/headboard-led-ota.bin` の署名を確かめ、合わなければ公開しません（ファームウェアは手元でビルド・署名してコミットする）
+- USB での書き込みは今までどおりで、署名は確かめません（本体に触れられる人からの書き換えは防げません。防ぐには Secure Boot v2 が必要で、eFuse を書くので元に戻せません）
+
+鍵を作り直すとき（ESP-IDF の環境で）:
+
+```sh
+espsecure.py generate_signing_key --version 2 --scheme rsa3072 secrets/headboard-signing-key.pem
+espsecure.py extract_public_key --version 2 --keyfile secrets/headboard-signing-key.pem keys/headboard-signing-pubkey.pem
+```
 
 ファームウェアを ESP-IDF で作ったのは、Tailscale を ESP32 上で動かす唯一の選択肢（MicroLink）が ESP-IDF 専用だからです。Arduino では組み込めません。
 

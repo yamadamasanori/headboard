@@ -10,6 +10,7 @@
 #include "esp_heap_caps.h"
 #include "esp_http_client.h"
 #include "esp_https_ota.h"
+#include "esp_ota_ops.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -430,7 +431,11 @@ static void install_update(void)
         usage_flush();
         esp_restart();
     }
-    ESP_LOGE(TAG, "update failed: %s", esp_err_to_name(err));
+    if (err == ESP_ERR_OTA_VALIDATE_FAILED) {
+        ESP_LOGE(TAG, "update rejected: not signed with the trusted key, or corrupted");
+    } else {
+        ESP_LOGE(TAG, "update failed: %s", esp_err_to_name(err));
+    }
     s_installing = false;
     s_progress = -1;
     publish_update_state();

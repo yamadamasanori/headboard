@@ -39,3 +39,12 @@ CONFIG_MBEDTLS_HKDF_C=y
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 CONFIG_ESP_TASK_WDT_TIMEOUT_S=30
 CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH=4096
+
+# ---- ファームウェアの署名（Secure Boot は使わない。eFuse は書かない） ----
+# 無線での更新（設定ページ・Home Assistant）のとき、今動いている版と同じ鍵で署名されているか確かめる。
+# 秘密鍵はリポジトリに入れない（secrets/ は .gitignore 済み）。公開鍵は keys/ に置く
+CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT=y
+CONFIG_SECURE_SIGNED_APPS_RSA_SCHEME=y
+CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT=y
+CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=y
+CONFIG_SECURE_BOOT_SIGNING_KEY="secrets/headboard-signing-key.pem"

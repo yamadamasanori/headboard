@@ -6,7 +6,7 @@
 #include "cJSON.h"
 #include "esp_err.h"
 
-#define FW_VERSION "2.2.0"
+#define FW_VERSION "2.3.0"
 
 #define STATUS_LED_DISABLED 0xFF
 #define MQTT_CA_MAX 2560      // CA 証明書（PEM）の最大の長さ（終端を含む）。RSA 4096 bit の証明書まで入る
