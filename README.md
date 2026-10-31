@@ -178,7 +178,7 @@ Home Assistant の「設定 → 更新」からも更新できます（下の「
 - 「一時停止」: 表示を止めます（受信は続き、「再開」でまとめて表示）。ログ欄を上にスクロールしても止まります
 - 「直近500行をコピー」: 絞り込み後の最新 500 行をクリップボードにコピーします
 - 「ファイルに保存」: 受信した全ログ（最大 20,000 行）をテキストファイルに保存します
-- 絞り込み欄（例: `mqtt`、`net:`）と「警告とエラーだけ」。エラーは赤、警告は黄で表示されます
+- 絞り込み欄（例: `mqtt`、`broker:`）と「警告とエラーだけ」。エラーは赤、警告は黄で表示されます
 
 Tailscale の途中経過のログは、通常は警告以上だけにしています。調べたいときは「デバイス」欄の「詳細ログを出す」をオンにして保存してください。
 
@@ -196,6 +196,7 @@ Tailscale の途中経過のログは、通常は警告以上だけにしてい�
 
 - 先に、Tailscale で `http://<tailnet 上のホスト名>/` を開けることを確かめてからオンにしてください（オンにするときに確認が出ます）
 - Tailscale の ACL で、本体に繋げる端末を自分の端末と Home Assistant に絞っておくと、さらに安全です
+- tailnet から本体の tailnet の IP に繋いできた接続だけを受け付けます。接続元のアドレスだけでは判断しないので、LAN から接続元を偽っても開けません。2.4.1 からの動作です
 - Tailscale に繋がらなくなると、本体の設定ページは開けません（ライト・MQTT・Home Assistant からの更新はそのまま動きます）。戻すには、BOOT ボタンを 3 秒押して Wi-Fi の設定を消し、Bluetooth で設定し直します。これで LAN からも開けるようになります
 - Home Assistant からの更新（GitHub Pages から本体が取りに行く）と、MQTT の接続には関係しません。MQTT も Tailscale 経由にしたいときは、ブローカーに tailnet の名前かアドレスを指定します
 
@@ -234,10 +235,12 @@ Home Assistant に MQTT 統合が設定されていれば、「設定 → デバ
 | `homeassistant/<sensor など>/<id>/<key>/config` | ESP32 → HA | 診断・累計・操作・更新のエンティティの自動探索の設定（retain）。使わなくなったもの（Tailscale をオフにしたときなど）は空のメッセージで消す |
 | `headboard/<id>/diag` | ESP32 → HA | 診断と累計をまとめた JSON（60 秒ごと、retain）。各エンティティは `value_template` でここから値を取り出す |
 | `headboard/<id>/update` | ESP32 → HA | `{"installed_version":"2.1.1","latest_version":"2.1.2","release_url":"https://github.com/yamadamasanori/headboard/releases/tag/v2.1.2","in_progress":false,"update_percentage":null}`（retain）。`release_url` は HA の「リリースのお知らせを読む」のリンク |
-| `headboard/<id>/restart/set`、`.../identify/set`、`.../check_update/set`、`.../reset_usage/set` | HA → ESP32 | ボタン（内容は何でもよい） |
+| `headboard/<id>/restart/set`、`.../identify/set`、`.../check_update/set`、`.../reset_usage/set` | HA → ESP32 | ボタン（内容は何でもよい）。retain 付きのものは無視する |
 | `headboard/<id>/sled_brightness/set` | HA → ESP32 | `1`〜`255` |
 | `headboard/<id>/sled_always_on/set`、`.../log_verbose/set` | HA → ESP32 | `ON` / `OFF`（本体に保存し、すぐに反映） |
-| `headboard/<id>/update/set` | HA → ESP32 | `install` で配布元の新しい版を書き込んで再起動 |
+| `headboard/<id>/update/set` | HA → ESP32 | `install` で配布元の新しい版を書き込んで再起動。retain 付きのものは無視する |
+
+ボタンと更新のコマンドは、ブローカーに保持（retain）されていると繋ぐたびに届き、再起動や更新を繰り返してしまうので、retain 付きのものは無視します（ログに `ignored retained command` と出ます）。
 
 Home Assistant が再起動したとき（`homeassistant/status` に `online`）は、自動探索の設定を送り直します。電源投入時はどちらも消灯から始まります。
 

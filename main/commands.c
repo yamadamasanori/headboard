@@ -12,9 +12,12 @@
 #include "leds.h"
 #include "logbuf.h"
 #include "net.h"
+#include "restart.h"
 #include "usage.h"
 #include "status_led.h"
 #include "tailscale.h"
+
+#define RESTART_DELAY_MS 300   // 応答を送り終えてから再起動する
 
 #ifdef CONFIG_HEADBOARD_USB_SETUP
 #define USB_SETUP true
@@ -102,13 +105,6 @@ static void send_status(const sink_t *k)
     send(k, o);
 }
 
-static void restart_later(void)
-{
-    vTaskDelay(pdMS_TO_TICKS(300));
-    usage_flush();
-    esp_restart();
-}
-
 // 量産版の USB で受け付けるもの（設定を変えないもの）
 static bool allowed(cmd_src_t src, const char *c)
 {
@@ -165,7 +161,7 @@ void cmd_handle(const char *line, cmd_src_t src, cmd_send_fn_t fn, void *ctx)
             send(&k, o);
             // 保存した設定は再起動後に反映する
             if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(req, "reboot"))) {
-                restart_later();
+                restart_later(RESTART_DELAY_MS);
             }
         }
     } else if (strcmp(c, "light") == 0) {
@@ -181,7 +177,7 @@ void cmd_handle(const char *line, cmd_src_t src, cmd_send_fn_t fn, void *ctx)
         }
     } else if (strcmp(c, "reboot") == 0) {
         send(&k, reply("rebooting"));
-        restart_later();
+        restart_later(RESTART_DELAY_MS);
     } else if (strcmp(c, "reset_usage") == 0) {
         usage_reset();
         send(&k, reply("usage_reset"));
@@ -189,7 +185,7 @@ void cmd_handle(const char *line, cmd_src_t src, cmd_send_fn_t fn, void *ctx)
         config_factory_reset();
         ts_factory_reset();
         send(&k, reply("rebooting"));
-        restart_later();
+        restart_later(RESTART_DELAY_MS);
     } else {
         send_error(&k, "不明なコマンドです");
     }

@@ -6,7 +6,7 @@
 #include "cJSON.h"
 #include "esp_err.h"
 
-#define FW_VERSION "2.4.0"
+#define FW_VERSION "2.4.1"
 
 #define STATUS_LED_DISABLED 0xFF
 #define MQTT_CA_MAX 2560      // CA 証明書（PEM）の最大の長さ（終端を含む）。RSA 4096 bit の証明書まで入る
@@ -40,7 +40,13 @@ typedef struct {
 // ログの出し方を設定に合わせる（起動時と設定変更時に呼ぶ）
 void config_apply_log_levels(void);
 
+// 設定。g_cfg を書き換えるときは config_lock() 〜 config_unlock() の中で行う（config_save もこの中で読む）。
+// 読むだけなら鍵は要らない（数値は 1 回で読め、文字列は保存した後に再起動してから使う）
 extern app_config_t g_cfg;
+
+// g_cfg の書き換えを他のタスクと重ならないようにする（同じタスクからは入れ子にしてよい）
+void config_lock(void);
+void config_unlock(void);
 
 // MAC アドレスから作るデバイス固有ID（例: headboard_a1b2c3）
 const char *config_device_id(void);
@@ -61,7 +67,7 @@ esp_err_t config_factory_reset(void);
 // Wi-Fi の設定だけを消す（Bluetooth で設定し直すとき）
 esp_err_t config_clear_wifi(void);
 
-// 認証キーが変わったとき、次回起動時に Tailscale の鍵を作り直すための印
+// 認証キーかホスト名を変えて保存したとき、次回起動時に Tailscale の鍵を作り直すための印（読むと消える）
 bool config_take_ts_reset_flag(void);
 
 // パスワード類は値を返さず、設定済みかどうかだけを返す

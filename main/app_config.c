@@ -10,6 +10,8 @@
 #include "esp_mac.h"
 #include "esp_random.h"
 #include "esp_wifi.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "mbedtls/sha256.h"
 #include "mbedtls/x509_crt.h"
 #include "nvs.h"
@@ -20,11 +22,31 @@
 #error "ESP32-S3 専用です（idf.py set-target esp32s3）"
 #endif
 
+#define ID_PREFIX "headboard_"
+
 static const char *TAG = "config";
 static const char *NS = "cfg";
 
 app_config_t g_cfg;
 static char s_device_id[24];
+static SemaphoreHandle_t s_lock;
+static bool s_ts_reset_pending;   // 次の保存で、Tailscale の鍵を作り直す印も書き込む
+
+// MAC アドレスから作った固有 ID の後半（例: a1b2c3）
+static const char *id_suffix(void)
+{
+    return config_device_id() + strlen(ID_PREFIX);
+}
+
+void config_lock(void)
+{
+    xSemaphoreTakeRecursive(s_lock, portMAX_DELAY);
+}
+
+void config_unlock(void)
+{
+    xSemaphoreGiveRecursive(s_lock);
+}
 
 static void set_defaults(void)
 {
@@ -42,7 +64,7 @@ static void set_defaults(void)
     g_cfg.watt_backlight = 1.0f;
     g_cfg.ts_enabled = false;
     // Tailscale のホスト名には "_" が使えないので "-" にする
-    snprintf(g_cfg.ts_hostname, sizeof(g_cfg.ts_hostname), "headboard-%s", config_device_id() + strlen("headboard_"));
+    snprintf(g_cfg.ts_hostname, sizeof(g_cfg.ts_hostname), "headboard-%s", id_suffix());
 }
 
 const char *config_device_id(void)
@@ -50,7 +72,7 @@ const char *config_device_id(void)
     if (!s_device_id[0]) {
         uint8_t mac[6];
         esp_read_mac(mac, ESP_MAC_WIFI_STA);
-        snprintf(s_device_id, sizeof(s_device_id), "headboard_%02x%02x%02x", mac[3], mac[4], mac[5]);
+        snprintf(s_device_id, sizeof(s_device_id), ID_PREFIX "%02x%02x%02x", mac[3], mac[4], mac[5]);
     }
     return s_device_id;
 }
@@ -59,7 +81,7 @@ const char *config_hostname(void)
 {
     static char s[24];
     if (!s[0]) {
-        snprintf(s, sizeof(s), "headboard-%s", config_device_id() + strlen("headboard_"));
+        snprintf(s, sizeof(s), "headboard-%s", id_suffix());
     }
     return s;
 }
@@ -69,7 +91,7 @@ const char *config_prov_name(void)
     static char s[24];
     if (!s[0]) {
         // 公式アプリ（ESP BLE Provisioning）は既定で "PROV_" で始まる名前を探す
-        snprintf(s, sizeof(s), "PROV_HB_%s", config_device_id() + strlen("headboard_"));
+        snprintf(s, sizeof(s), "PROV_HB_%s", id_suffix());
     }
     return s;
 }
@@ -130,6 +152,7 @@ static void load_str(nvs_handle_t h, const char *key, char *dst, size_t len)
 
 void config_load(void)
 {
+    s_lock = xSemaphoreCreateRecursiveMutex();
     set_defaults();
     nvs_handle_t h;
     if (nvs_open(NS, NVS_READONLY, &h) != ESP_OK) {
@@ -181,6 +204,14 @@ void config_load(void)
     ESP_LOGI(TAG, "config loaded (ssid=\"%s\", mqtt=%s:%u)", g_cfg.wifi_ssid, g_cfg.mqtt_host, g_cfg.mqtt_port);
 }
 
+// 最初に失敗したところのエラーを err に残し、それ以降は書き込まない
+#define NVS_SET(call)          \
+    do {                       \
+        if (err == ESP_OK) {   \
+            err = (call);      \
+        }                      \
+    } while (0)
+
 esp_err_t config_save(void)
 {
     nvs_handle_t h;
@@ -188,31 +219,42 @@ esp_err_t config_save(void)
     if (err != ESP_OK) {
         return err;
     }
-    nvs_set_str(h, "wifi_ssid", g_cfg.wifi_ssid);
-    nvs_set_str(h, "wifi_pass", g_cfg.wifi_pass);
-    nvs_set_str(h, "mqtt_host", g_cfg.mqtt_host);
-    nvs_set_str(h, "mqtt_user", g_cfg.mqtt_user);
-    nvs_set_str(h, "mqtt_pass", g_cfg.mqtt_pass);
-    nvs_set_u8(h, "mqtt_tls", g_cfg.mqtt_tls ? 1 : 0);
-    nvs_set_str(h, "mqtt_ca", g_cfg.mqtt_ca);
-    nvs_set_str(h, "dev_name", g_cfg.device_name);
-    nvs_set_u16(h, "mqtt_port", g_cfg.mqtt_port);
-    nvs_set_u8(h, "pin_read", g_cfg.pin_reading);
-    nvs_set_u8(h, "pin_back", g_cfg.pin_backlight);
-    nvs_set_u16(h, "pwm_freq", g_cfg.pwm_freq);
-    nvs_set_u8(h, "pwm_inv", g_cfg.pwm_invert ? 1 : 0);
-    nvs_set_u8(h, "ts_en", g_cfg.ts_enabled ? 1 : 0);
-    nvs_set_u8(h, "ts_only", g_cfg.tailnet_only ? 1 : 0);
-    nvs_set_str(h, "ts_key", g_cfg.ts_authkey);
-    nvs_set_str(h, "ts_host", g_cfg.ts_hostname);
-    nvs_set_u8(h, "sled_pin", g_cfg.sled_pin);
-    nvs_set_u8(h, "sled_bri", g_cfg.sled_brightness);
-    nvs_set_u8(h, "sled_on", g_cfg.sled_always_on ? 1 : 0);
-    nvs_set_u8(h, "log_verb", g_cfg.log_verbose ? 1 : 0);
-    nvs_set_u32(h, "mw_read", (uint32_t)(g_cfg.watt_reading * 1000.0f + 0.5f));
-    nvs_set_u32(h, "mw_back", (uint32_t)(g_cfg.watt_backlight * 1000.0f + 0.5f));
-    err = nvs_commit(h);
+    config_lock();
+    NVS_SET(nvs_set_str(h, "wifi_ssid", g_cfg.wifi_ssid));
+    NVS_SET(nvs_set_str(h, "wifi_pass", g_cfg.wifi_pass));
+    NVS_SET(nvs_set_str(h, "mqtt_host", g_cfg.mqtt_host));
+    NVS_SET(nvs_set_str(h, "mqtt_user", g_cfg.mqtt_user));
+    NVS_SET(nvs_set_str(h, "mqtt_pass", g_cfg.mqtt_pass));
+    NVS_SET(nvs_set_u8(h, "mqtt_tls", g_cfg.mqtt_tls ? 1 : 0));
+    NVS_SET(nvs_set_str(h, "mqtt_ca", g_cfg.mqtt_ca));
+    NVS_SET(nvs_set_str(h, "dev_name", g_cfg.device_name));
+    NVS_SET(nvs_set_u16(h, "mqtt_port", g_cfg.mqtt_port));
+    NVS_SET(nvs_set_u8(h, "pin_read", g_cfg.pin_reading));
+    NVS_SET(nvs_set_u8(h, "pin_back", g_cfg.pin_backlight));
+    NVS_SET(nvs_set_u16(h, "pwm_freq", g_cfg.pwm_freq));
+    NVS_SET(nvs_set_u8(h, "pwm_inv", g_cfg.pwm_invert ? 1 : 0));
+    NVS_SET(nvs_set_u8(h, "ts_en", g_cfg.ts_enabled ? 1 : 0));
+    NVS_SET(nvs_set_u8(h, "ts_only", g_cfg.tailnet_only ? 1 : 0));
+    NVS_SET(nvs_set_str(h, "ts_key", g_cfg.ts_authkey));
+    NVS_SET(nvs_set_str(h, "ts_host", g_cfg.ts_hostname));
+    NVS_SET(nvs_set_u8(h, "sled_pin", g_cfg.sled_pin));
+    NVS_SET(nvs_set_u8(h, "sled_bri", g_cfg.sled_brightness));
+    NVS_SET(nvs_set_u8(h, "sled_on", g_cfg.sled_always_on ? 1 : 0));
+    NVS_SET(nvs_set_u8(h, "log_verb", g_cfg.log_verbose ? 1 : 0));
+    NVS_SET(nvs_set_u32(h, "mw_read", (uint32_t)(g_cfg.watt_reading * 1000.0f + 0.5f)));
+    NVS_SET(nvs_set_u32(h, "mw_back", (uint32_t)(g_cfg.watt_backlight * 1000.0f + 0.5f)));
+    if (s_ts_reset_pending) {
+        NVS_SET(nvs_set_u8(h, "ts_reset", 1));  // 新しいキーで登録し直す（次の起動で）
+    }
+    NVS_SET(nvs_commit(h));
+    if (err == ESP_OK) {
+        s_ts_reset_pending = false;
+    }
+    config_unlock();
     nvs_close(h);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "config save failed: %s", esp_err_to_name(err));
+    }
     return err;
 }
 
@@ -228,28 +270,23 @@ esp_err_t config_factory_reset(void)
     nvs_close(h);
     esp_wifi_restore();
     usage_reset();  // 点灯時間などの累計も消す
+    config_lock();
     set_defaults();
+    s_ts_reset_pending = false;
+    config_unlock();
     return err;
 }
 
 esp_err_t config_clear_wifi(void)
 {
+    config_lock();
     g_cfg.wifi_ssid[0] = 0;
     g_cfg.wifi_pass[0] = 0;
     // Tailscale に繋がらなくなって設定ページを開けないときに、LAN から開けるように戻す手段を兼ねる
     g_cfg.tailnet_only = false;
+    config_unlock();
     esp_wifi_restore();  // Wi-Fi ドライバが別に保存している接続先も消す
     return config_save();
-}
-
-static void set_ts_reset_flag(void)
-{
-    nvs_handle_t h;
-    if (nvs_open(NS, NVS_READWRITE, &h) == ESP_OK) {
-        nvs_set_u8(h, "ts_reset", 1);
-        nvs_commit(h);
-        nvs_close(h);
-    }
 }
 
 bool config_take_ts_reset_flag(void)
@@ -445,18 +482,27 @@ static bool apply_json(app_config_t *c, const cJSON *o, char *err, size_t err_le
         snprintf(err, err_len, "device_name を入力してください");
         return false;
     }
-    const char *bool_keys[] = {"pwm_invert", "ts_enabled", "sled_always_on", "log_verbose", "mqtt_tls", "tailnet_only"};
-    bool *bool_dst[] = {&c->pwm_invert, &c->ts_enabled, &c->sled_always_on, &c->log_verbose, &c->mqtt_tls, &c->tailnet_only};
-    for (int i = 0; i < 6; i++) {
-        const cJSON *v = cJSON_GetObjectItemCaseSensitive(o, bool_keys[i]);
+    const struct {
+        const char *key;
+        bool *dst;
+    } bools[] = {
+        {"pwm_invert", &c->pwm_invert},
+        {"ts_enabled", &c->ts_enabled},
+        {"sled_always_on", &c->sled_always_on},
+        {"log_verbose", &c->log_verbose},
+        {"mqtt_tls", &c->mqtt_tls},
+        {"tailnet_only", &c->tailnet_only},
+    };
+    for (size_t i = 0; i < sizeof(bools) / sizeof(bools[0]); i++) {
+        const cJSON *v = cJSON_GetObjectItemCaseSensitive(o, bools[i].key);
         if (!v) {
             continue;
         }
         if (!cJSON_IsBool(v)) {
-            snprintf(err, err_len, "%s は true/false で指定してください", bool_keys[i]);
+            snprintf(err, err_len, "%s は true/false で指定してください", bools[i].key);
             return false;
         }
-        *bool_dst[i] = cJSON_IsTrue(v);
+        *bools[i].dst = cJSON_IsTrue(v);
     }
     // 貼り付けたときの前後の空白や改行は除く（中の改行は PEM に必要なので残す）
     char *ca = c->mqtt_ca;
@@ -484,9 +530,6 @@ static bool apply_json(app_config_t *c, const cJSON *o, char *err, size_t err_le
         snprintf(err, err_len, "「Tailscale からだけ開く」は、Tailscale を使うときだけ選べます");
         return false;
     }
-    if (strcmp(c->ts_authkey, g_cfg.ts_authkey) != 0 || strcmp(c->ts_hostname, g_cfg.ts_hostname) != 0) {
-        set_ts_reset_flag();  // 新しいキーで登録し直す
-    }
     c->mqtt_port = port;
     c->pin_reading = pr;
     c->pin_backlight = pb;
@@ -505,11 +548,17 @@ bool config_from_json(const cJSON *o, char *err, size_t err_len)
         snprintf(err, err_len, "メモリが足りません");
         return false;
     }
+    config_lock();
     *c = g_cfg;
     bool ok = apply_json(c, o, err, err_len);
     if (ok) {
+        // 認証キーかホスト名が変わったら、保存するときに「鍵を作り直す」印も書き込む
+        if (strcmp(c->ts_authkey, g_cfg.ts_authkey) != 0 || strcmp(c->ts_hostname, g_cfg.ts_hostname) != 0) {
+            s_ts_reset_pending = true;
+        }
         g_cfg = *c;
     }
+    config_unlock();
     free(c);
     return ok;
 }

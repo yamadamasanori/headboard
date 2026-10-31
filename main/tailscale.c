@@ -72,6 +72,11 @@ bool ts_is_connected(void)
     return s_ml && microlink_is_connected(s_ml);
 }
 
+uint32_t ts_vpn_ip(void)
+{
+    return ts_is_connected() ? microlink_get_vpn_ip(s_ml) : 0;
+}
+
 bool ts_has_error(void)
 {
     return s_ml && (microlink_auth_failed(s_ml) || microlink_get_state(s_ml) == ML_STATE_ERROR);

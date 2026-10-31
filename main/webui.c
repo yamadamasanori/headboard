@@ -20,7 +20,8 @@
 #include "logbuf.h"
 #include "mdns.h"
 #include "ota.h"
-#include "usage.h"
+#include "tailscale.h"
+#include "restart.h"
 
 static const char *TAG = "webui";
 
@@ -199,27 +200,46 @@ static void log_pump_task(void *arg)
 
 // ---------------------------------------------------------------- ページとファイル
 
-// 接続元が tailnet（100.64.0.0/10）か。IPv6 のソケットで受けた IPv4 の接続（::ffff:a.b.c.d）も見る
-static bool from_tailnet(httpd_req_t *req)
+// ソケットのアドレスを IPv4（ホストバイトオーダー）で返す。IPv6 のソケットで受けた IPv4 の接続（::ffff:a.b.c.d）も見る
+static bool sockaddr_ipv4(const struct sockaddr_storage *addr, uint32_t *ip)
 {
-    struct sockaddr_storage addr;
-    socklen_t len = sizeof(addr);
-    if (getpeername(httpd_req_to_sockfd(req), (struct sockaddr *)&addr, &len) != 0) {
-        return false;
+    if (addr->ss_family == AF_INET) {
+        *ip = ntohl(((const struct sockaddr_in *)addr)->sin_addr.s_addr);
+        return true;
     }
-    uint32_t ip;
-    if (addr.ss_family == AF_INET) {
-        ip = ntohl(((struct sockaddr_in *)&addr)->sin_addr.s_addr);
-    } else if (addr.ss_family == AF_INET6) {
-        const uint32_t *a = ((struct sockaddr_in6 *)&addr)->sin6_addr.un.u32_addr;
+    if (addr->ss_family == AF_INET6) {
+        const uint32_t *a = ((const struct sockaddr_in6 *)addr)->sin6_addr.un.u32_addr;
         if (a[0] != 0 || a[1] != 0 || a[2] != htonl(0xffff)) {
             return false;
         }
-        ip = ntohl(a[3]);
-    } else {
+        *ip = ntohl(a[3]);
+        return true;
+    }
+    return false;
+}
+
+// tailnet から本体の tailnet の IP に繋いできた接続か。
+// 接続元のアドレスだけで判断すると、Tailscale が切れている間は 100.x 宛ての返信が LAN のゲートウェイに出るので、
+// LAN でゲートウェイに成りすました相手に接続元を偽られてしまう。そこで次をすべて確かめる:
+//   - Tailscale に繋がっている（返信が WireGuard に送られる）
+//   - 接続先が本体の tailnet の IP（LAN の IP 宛てではない）
+//   - 接続元が tailnet（100.64.0.0/10）。LAN の相手が本体の tailnet の IP 宛てに送ってきても、返信が LAN に出ないように
+static bool from_tailnet(httpd_req_t *req)
+{
+    uint32_t vpn_ip = ts_vpn_ip();
+    if (!vpn_ip) {
         return false;
     }
-    return (ip & 0xffc00000) == 0x64400000;
+    int fd = httpd_req_to_sockfd(req);
+    struct sockaddr_storage local, peer;
+    socklen_t local_len = sizeof(local), peer_len = sizeof(peer);
+    uint32_t local_ip, peer_ip;
+    if (getsockname(fd, (struct sockaddr *)&local, &local_len) != 0 ||
+        getpeername(fd, (struct sockaddr *)&peer, &peer_len) != 0 ||
+        !sockaddr_ipv4(&local, &local_ip) || !sockaddr_ipv4(&peer, &peer_ip)) {
+        return false;
+    }
+    return local_ip == vpn_ip && (peer_ip & 0xffc00000) == 0x64400000;
 }
 
 // 「Tailscale からだけ開く」のとき、LAN からの接続を断る（断ったら true）
@@ -228,8 +248,9 @@ static bool reject_lan(httpd_req_t *req)
     if (!g_cfg.tailnet_only || from_tailnet(req)) {
         return false;
     }
-    char msg[320];
+    char msg[384];
     snprintf(msg, sizeof(msg), "この本体の設定ページは Tailscale からだけ開けます（http://%s/）。"
+             "Tailscale に繋がっていない間は開けません。"
              "LAN から開くには、BOOT ボタンを 3 秒押して Wi-Fi の設定を消してください", g_cfg.ts_hostname);
     httpd_resp_set_status(req, "403 Forbidden");
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
@@ -414,12 +435,6 @@ static esp_err_t h_ws(httpd_req_t *req)
 
 // ---------------------------------------------------------------- OTA（ファームウェア更新）
 
-static void restart_cb(void *arg)
-{
-    usage_flush();
-    esp_restart();
-}
-
 static esp_err_t ota_fail(httpd_req_t *req, const char *status, const char *msg)
 {
     ESP_LOGW(TAG, "OTA rejected: %s", msg);
@@ -510,12 +525,7 @@ static esp_err_t h_ota(httpd_req_t *req)
     ESP_LOGI(TAG, "OTA done, restarting");
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
     httpd_resp_sendstr(req, "更新しました。再起動します");
-    // 応答を返し終えてから再起動する
-    const esp_timer_create_args_t ta = {.callback = restart_cb, .name = "ota_restart"};
-    esp_timer_handle_t t;
-    if (esp_timer_create(&ta, &t) == ESP_OK) {
-        esp_timer_start_once(t, 1500 * 1000);
-    }
+    restart_later(1500);  // 応答を返し終えてから再起動する
     return ESP_OK;
 }
 
@@ -543,7 +553,7 @@ void webui_start(void)
     uint8_t rnd[16];
     esp_fill_random(rnd, sizeof(rnd));
     for (int i = 0; i < 16; i++) {
-        sprintf(s_token + i * 2, "%02x", rnd[i]);
+        snprintf(s_token + i * 2, sizeof(s_token) - i * 2, "%02x", rnd[i]);
     }
     snprintf(s_boot_id, sizeof(s_boot_id), "%08" PRIx32, esp_random());
 

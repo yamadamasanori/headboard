@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "app_config.h"
+#include "broker.h"
 #include "driver/temperature_sensor.h"
 #include "esp_app_desc.h"
 #include "esp_crt_bundle.h"
@@ -18,13 +19,13 @@
 #include "freertos/task.h"
 #include "logbuf.h"
 #include "net.h"
+#include "restart.h"
 #include "usage.h"
 #include "status_led.h"
 #include "tailscale.h"
 
 static const char *TAG = "ha";
 
-#define HA_PREFIX         "homeassistant"
 #define DIAG_INTERVAL_MS  60000
 #define CHECK_INTERVAL_US (6LL * 3600 * 1000000)   // 新しい版を探す間隔
 #define IDENTIFY_MS       10000
@@ -40,10 +41,7 @@ static const char *TAG = "ha";
 #define REQ_CHECK_NOW (1u << 4)   // 「更新を確認」ボタン（前回の確認からの時間によらず確かめる）
 
 static TaskHandle_t s_task;
-static esp_mqtt_client_handle_t s_mqtt;
 static volatile bool s_connected;
-static char s_base[48];
-static char s_avail[64];
 static temperature_sensor_handle_t s_tsens;
 
 static char s_latest[32];          // 配布元の最新の版（分からなければ空）
@@ -166,7 +164,7 @@ static void publish_entity(const entity_t *e)
     snprintf(topic, sizeof(topic), HA_PREFIX "/%s/%s/%s/config", e->component, dev_id, e->key);
     if (!enabled(e)) {
         // 使わなくなったものは Home Assistant から消す
-        esp_mqtt_client_publish(s_mqtt, topic, "", 0, 1, 1);
+        esp_mqtt_client_publish(broker_client(), topic, "", 0, 1, 1);
         return;
     }
 
@@ -174,7 +172,7 @@ static void publish_entity(const entity_t *e)
     cJSON_AddStringToObject(o, "name", e->name);
     snprintf(buf, sizeof(buf), "%s_%s", dev_id, e->key);
     cJSON_AddStringToObject(o, "unique_id", buf);
-    cJSON_AddStringToObject(o, "availability_topic", s_avail);
+    cJSON_AddStringToObject(o, "availability_topic", broker_avail_topic());
     if (e->cat == CAT_DIAG) {
         cJSON_AddStringToObject(o, "entity_category", "diagnostic");
     } else if (e->cat == CAT_CONFIG || e->cat == CAT_CONFIG_OFF) {
@@ -184,19 +182,19 @@ static void publish_entity(const entity_t *e)
         cJSON_AddFalseToObject(o, "enabled_by_default");
     }
     if (e->value) {
-        snprintf(buf, sizeof(buf), "%s/diag", s_base);
+        snprintf(buf, sizeof(buf), "%s/diag", broker_base_topic());
         cJSON_AddStringToObject(o, "state_topic", buf);
         cJSON_AddStringToObject(o, "value_template", e->value);
     }
     if (strcmp(e->component, "update") == 0) {
-        snprintf(buf, sizeof(buf), "%s/update", s_base);
+        snprintf(buf, sizeof(buf), "%s/update", broker_base_topic());
         cJSON_AddStringToObject(o, "state_topic", buf);
         cJSON_AddStringToObject(o, "payload_install", "install");
         cJSON_AddStringToObject(o, "title", "ヘッドボードLED");
     }
     if (strcmp(e->component, "button") == 0 || strcmp(e->component, "number") == 0 ||
         strcmp(e->component, "switch") == 0 || strcmp(e->component, "update") == 0) {
-        snprintf(buf, sizeof(buf), "%s/%s/set", s_base, e->key);
+        snprintf(buf, sizeof(buf), "%s/%s/set", broker_base_topic(), e->key);
         cJSON_AddStringToObject(o, "command_topic", buf);
     }
     if (strcmp(e->component, "number") == 0) {
@@ -223,7 +221,7 @@ static void publish_entity(const entity_t *e)
 
     char *payload = cJSON_PrintUnformatted(o);
     if (payload) {
-        esp_mqtt_client_publish(s_mqtt, topic, payload, 0, 1, 1);
+        esp_mqtt_client_publish(broker_client(), topic, payload, 0, 1, 1);
         free(payload);
     }
     cJSON_Delete(o);
@@ -257,10 +255,10 @@ static void publish_diag(void)
     cJSON_AddBoolToObject(cfg, "log_verbose", g_cfg.log_verbose);
 
     char topic[64];
-    snprintf(topic, sizeof(topic), "%s/diag", s_base);
+    snprintf(topic, sizeof(topic), "%s/diag", broker_base_topic());
     char *payload = cJSON_PrintUnformatted(o);
     if (payload) {
-        esp_mqtt_client_publish(s_mqtt, topic, payload, 0, 0, 1);
+        esp_mqtt_client_publish(broker_client(), topic, payload, 0, 0, 1);
         free(payload);
     }
     cJSON_Delete(o);
@@ -291,10 +289,10 @@ static void publish_update_state(void)
         cJSON_AddNullToObject(o, "update_percentage");
     }
     char topic[64];
-    snprintf(topic, sizeof(topic), "%s/update", s_base);
+    snprintf(topic, sizeof(topic), "%s/update", broker_base_topic());
     char *payload = cJSON_PrintUnformatted(o);
     if (payload) {
-        esp_mqtt_client_publish(s_mqtt, topic, payload, 0, 1, 1);
+        esp_mqtt_client_publish(broker_client(), topic, payload, 0, 1, 1);
         free(payload);
     }
     cJSON_Delete(o);
@@ -428,8 +426,7 @@ static void install_update(void)
         s_progress = 100;
         publish_update_state();
         vTaskDelay(pdMS_TO_TICKS(1000));  // 状態を送り終えるのを待つ
-        usage_flush();
-        esp_restart();
+        restart_now();
     }
     if (err == ESP_ERR_OTA_VALIDATE_FAILED) {
         ESP_LOGE(TAG, "update rejected: not signed with the trusted key, or corrupted");
@@ -453,8 +450,7 @@ static void ha_task(void *arg)
         if (req & REQ_RESTART) {
             ESP_LOGW(TAG, "restart requested from Home Assistant");
             vTaskDelay(pdMS_TO_TICKS(300));
-            usage_flush();
-            esp_restart();
+            restart_now();
         }
         if (!s_connected) {
             continue;
@@ -496,19 +492,16 @@ void ha_init(void)
     xTaskCreate(ha_task, "ha", 8192, NULL, 4, &s_task);
 }
 
-void ha_on_mqtt_connected(esp_mqtt_client_handle_t client, const char *base, const char *avail_topic)
+void ha_on_mqtt_connected(void)
 {
-    s_mqtt = client;
-    strlcpy(s_base, base, sizeof(s_base));
-    strlcpy(s_avail, avail_topic, sizeof(s_avail));
     for (size_t i = 0; i < ENTITY_COUNT; i++) {
         publish_entity(&ENTITIES[i]);
         const char *c = ENTITIES[i].component;
         if (enabled(&ENTITIES[i]) && (strcmp(c, "button") == 0 || strcmp(c, "number") == 0 ||
                                       strcmp(c, "switch") == 0 || strcmp(c, "update") == 0)) {
             char topic[80];
-            snprintf(topic, sizeof(topic), "%s/%s/set", s_base, ENTITIES[i].key);
-            esp_mqtt_client_subscribe(s_mqtt, topic, 1);
+            snprintf(topic, sizeof(topic), "%s/%s/set", broker_base_topic(), ENTITIES[i].key);
+            esp_mqtt_client_subscribe(broker_client(), topic, 1);
         }
     }
     s_connected = true;
@@ -523,8 +516,9 @@ void ha_on_mqtt_disconnected(void)
 // <base>/<key>/set なら key を返す
 static const char *command_key(const char *topic, char *key, size_t len)
 {
-    size_t bl = strlen(s_base);
-    if (!s_base[0] || strncmp(topic, s_base, bl) != 0 || topic[bl] != '/') {
+    const char *base = broker_base_topic();
+    size_t bl = strlen(base);
+    if (!base[0] || strncmp(topic, base, bl) != 0 || topic[bl] != '/') {
         return NULL;
     }
     const char *k = topic + bl + 1;
@@ -542,11 +536,23 @@ static bool payload_is(const char *data, int len, const char *s)
     return len == (int)strlen(s) && strncmp(data, s, len) == 0;
 }
 
-bool ha_handle_message(const char *topic, const char *data, int len)
+// 1 回押すたびに動くもの（ブローカーに保持されていると、繋ぐたびに動いてしまう）
+static bool is_action(const char *key)
+{
+    return strcmp(key, "restart") == 0 || strcmp(key, "identify") == 0 || strcmp(key, "check_update") == 0 ||
+           strcmp(key, "reset_usage") == 0 || strcmp(key, "update") == 0;
+}
+
+bool ha_handle_message(const char *topic, const char *data, int len, bool retained)
 {
     char key[32];
     if (!command_key(topic, key, sizeof(key))) {
         return false;
+    }
+    if (retained && is_action(key)) {
+        // retain 付きで送られたボタンなどは、再起動や更新を繰り返さないように無視する
+        ESP_LOGW(TAG, "ignored retained command: %s", key);
+        return true;
     }
     bool changed = false;
     if (strcmp(key, "restart") == 0) {
@@ -567,13 +573,17 @@ bool ha_handle_message(const char *topic, const char *data, int len)
         memcpy(buf, data, len < (int)sizeof(buf) - 1 ? len : (int)sizeof(buf) - 1);
         int v = (int)strtof(buf, NULL);
         if (v >= 1 && v <= 255) {
+            config_lock();
             g_cfg.sled_brightness = v;
+            config_unlock();
             changed = true;
         }
     } else if (strcmp(key, "sled_always_on") == 0 || strcmp(key, "log_verbose") == 0) {
         bool *dst = strcmp(key, "sled_always_on") == 0 ? &g_cfg.sled_always_on : &g_cfg.log_verbose;
         if (payload_is(data, len, "ON") || payload_is(data, len, "OFF")) {
+            config_lock();
             *dst = payload_is(data, len, "ON");
+            config_unlock();
             config_apply_log_levels();
             changed = true;
         }

@@ -37,8 +37,10 @@ static void on_prov_event(void *arg, esp_event_base_t base, int32_t id, void *da
     }
     case WIFI_PROV_CRED_SUCCESS:
         ESP_LOGI(TAG, "Wi-Fi connected, saving settings");
+        config_lock();
         strlcpy(g_cfg.wifi_ssid, s_ssid, sizeof(g_cfg.wifi_ssid));
         strlcpy(g_cfg.wifi_pass, s_pass, sizeof(g_cfg.wifi_pass));
+        config_unlock();
         if (config_save() != ESP_OK) {
             ESP_LOGE(TAG, "failed to save Wi-Fi settings");
         }

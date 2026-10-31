@@ -3,10 +3,9 @@
 #include "app_config.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
-#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "usage.h"
+#include "restart.h"
 #include "status_led.h"
 #include "tailscale.h"
 
@@ -43,12 +42,11 @@ static void button_task(void *arg)
             ESP_LOGW(TAG, "factory reset by button");
             config_factory_reset();
             ts_factory_reset();
-            esp_restart();
+            restart_now();
         } else if (held_ms >= WIFI_RESET_MS) {
             ESP_LOGW(TAG, "Wi-Fi settings cleared by button");
             config_clear_wifi();
-            usage_flush();
-            esp_restart();
+            restart_now();
         }
         held_ms = 0;
     }
