@@ -198,6 +198,7 @@ Tailscale の途中経過のログは、通常は警告以上だけにしてい�
 - Tailscale の ACL で、本体に繋げる端末を自分の端末と Home Assistant に絞っておくと、さらに安全です
 - tailnet から本体の tailnet の IP に繋いできた接続だけを受け付けます。接続元のアドレスだけでは判断しないので、LAN から接続元を偽っても開けません。2.4.1 からの動作です
 - Tailscale に繋がらなくなると、本体の設定ページは開けません（ライト・MQTT・Home Assistant からの更新はそのまま動きます）。戻すには、BOOT ボタンを 3 秒押して Wi-Fi の設定を消し、Bluetooth で設定し直します。これで LAN からも開けるようになります
+- Home Assistant のデバイスのページの「デバイスを設定」のリンクは、いつも `http://headboard-xxxxxx.local/`（LAN）を指すので、オンのときは「Tailscale からだけ開けます」と表示されます。Tailscale の `http://<tailnet 上のホスト名>/` から開いてください
 - Home Assistant からの更新（GitHub Pages から本体が取りに行く）と、MQTT の接続には関係しません。MQTT も Tailscale 経由にしたいときは、ブローカーに tailnet の名前かアドレスを指定します
 
 ### 6. Home Assistant で確認する
@@ -252,7 +253,7 @@ Home Assistant が再起動したとき（`homeassistant/status` に `online`）
 {"cmd":"hello"}                      機種・バージョン・本体の名前（USB では設定用コードも）
 {"cmd":"get"}                        現在の設定（パスワードは「設定済みか」だけ）
 {"cmd":"set","config":{...},"reboot":true}   設定を保存（含めた項目だけ変更）
-{"cmd":"status"}                     Wi-Fi / MQTT / Tailscale / ライト / 状態表示 LED の状態、空きメモリ（合計・内蔵 RAM の今と最小値・PSRAM）、再起動の理由、エラー
+{"cmd":"status"}                     Wi-Fi / MQTT / Tailscale / ライト / 状態表示 LED の状態、空きメモリ（合計・内蔵 RAM の今と最小値・PSRAM）、再起動の理由、エラー、前回のクラッシュ
 {"cmd":"prev_log"}                   前回の起動の最後のログ
 {"cmd":"light","id":"reading","brightness":100}   点灯テスト
 {"cmd":"reset_usage"}                累計（起動回数・点灯時間・電力量など）を 0 に戻す（設定は残す）
