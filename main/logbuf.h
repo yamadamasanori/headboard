@@ -25,3 +25,6 @@ const char *logbuf_last_error(void);
 
 // 前回の再起動の理由（"電源投入"、"クラッシュ" など）
 const char *logbuf_reset_reason(void);
+
+// 前回クラッシュしたときの理由・タスク・Backtrace（フラッシュに記録があるときだけ。なければ空文字）
+const char *logbuf_crash(void);

@@ -1,14 +1,22 @@
 {
   "name": "ヘッドボードLED",
-  "version": "2.3.0",
+  "version": "2.4.0",
   "new_install_prompt_erase": true,
   "builds": [
     {
       "chipFamily": "ESP32-S3",
       "parts": [
         {
-          "path": "firmware/headboard-led.bin",
+          "path": "firmware/headboard-led-boot.bin",
           "offset": 0
+        },
+        {
+          "path": "firmware/headboard-led-otadata.bin",
+          "offset": 61440
+        },
+        {
+          "path": "firmware/headboard-led-ota.bin",
+          "offset": 131072
         }
       ]
     }

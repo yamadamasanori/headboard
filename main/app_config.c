@@ -157,6 +157,9 @@ void config_load(void)
     if (nvs_get_u8(h, "ts_en", &flag) == ESP_OK) {
         g_cfg.ts_enabled = flag != 0;
     }
+    if (nvs_get_u8(h, "ts_only", &flag) == ESP_OK) {
+        g_cfg.tailnet_only = flag != 0;
+    }
     load_str(h, "ts_key", g_cfg.ts_authkey, sizeof(g_cfg.ts_authkey));
     nvs_get_u8(h, "sled_pin", &g_cfg.sled_pin);
     nvs_get_u8(h, "sled_bri", &g_cfg.sled_brightness);
@@ -199,6 +202,7 @@ esp_err_t config_save(void)
     nvs_set_u16(h, "pwm_freq", g_cfg.pwm_freq);
     nvs_set_u8(h, "pwm_inv", g_cfg.pwm_invert ? 1 : 0);
     nvs_set_u8(h, "ts_en", g_cfg.ts_enabled ? 1 : 0);
+    nvs_set_u8(h, "ts_only", g_cfg.tailnet_only ? 1 : 0);
     nvs_set_str(h, "ts_key", g_cfg.ts_authkey);
     nvs_set_str(h, "ts_host", g_cfg.ts_hostname);
     nvs_set_u8(h, "sled_pin", g_cfg.sled_pin);
@@ -232,6 +236,8 @@ esp_err_t config_clear_wifi(void)
 {
     g_cfg.wifi_ssid[0] = 0;
     g_cfg.wifi_pass[0] = 0;
+    // Tailscale に繋がらなくなって設定ページを開けないときに、LAN から開けるように戻す手段を兼ねる
+    g_cfg.tailnet_only = false;
     esp_wifi_restore();  // Wi-Fi ドライバが別に保存している接続先も消す
     return config_save();
 }
@@ -278,6 +284,7 @@ void config_to_json(cJSON *o)
     cJSON_AddNumberToObject(o, "pwm_freq", g_cfg.pwm_freq);
     cJSON_AddBoolToObject(o, "pwm_invert", g_cfg.pwm_invert);
     cJSON_AddBoolToObject(o, "ts_enabled", g_cfg.ts_enabled);
+    cJSON_AddBoolToObject(o, "tailnet_only", g_cfg.tailnet_only);
     cJSON_AddBoolToObject(o, "ts_authkey_set", g_cfg.ts_authkey[0] != 0);
     cJSON_AddStringToObject(o, "ts_hostname", g_cfg.ts_hostname);
     cJSON_AddNumberToObject(o, "sled_pin", g_cfg.sled_pin == STATUS_LED_DISABLED ? -1 : g_cfg.sled_pin);
@@ -438,9 +445,9 @@ static bool apply_json(app_config_t *c, const cJSON *o, char *err, size_t err_le
         snprintf(err, err_len, "device_name を入力してください");
         return false;
     }
-    const char *bool_keys[] = {"pwm_invert", "ts_enabled", "sled_always_on", "log_verbose", "mqtt_tls"};
-    bool *bool_dst[] = {&c->pwm_invert, &c->ts_enabled, &c->sled_always_on, &c->log_verbose, &c->mqtt_tls};
-    for (int i = 0; i < 5; i++) {
+    const char *bool_keys[] = {"pwm_invert", "ts_enabled", "sled_always_on", "log_verbose", "mqtt_tls", "tailnet_only"};
+    bool *bool_dst[] = {&c->pwm_invert, &c->ts_enabled, &c->sled_always_on, &c->log_verbose, &c->mqtt_tls, &c->tailnet_only};
+    for (int i = 0; i < 6; i++) {
         const cJSON *v = cJSON_GetObjectItemCaseSensitive(o, bool_keys[i]);
         if (!v) {
             continue;
@@ -471,6 +478,10 @@ static bool apply_json(app_config_t *c, const cJSON *o, char *err, size_t err_le
     }
     if (c->ts_enabled && !c->ts_authkey[0]) {
         snprintf(err, err_len, "Tailscale を使うには認証キーを入力してください");
+        return false;
+    }
+    if (c->tailnet_only && !c->ts_enabled) {
+        snprintf(err, err_len, "「Tailscale からだけ開く」は、Tailscale を使うときだけ選べます");
         return false;
     }
     if (strcmp(c->ts_authkey, g_cfg.ts_authkey) != 0 || strcmp(c->ts_hostname, g_cfg.ts_hostname) != 0) {

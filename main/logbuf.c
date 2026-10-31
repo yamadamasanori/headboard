@@ -2,9 +2,12 @@
 
 #include <stdarg.h>
 #include <stdbool.h>
+#include <inttypes.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "esp_attr.h"
+#include "esp_core_dump.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_system.h"
@@ -15,6 +18,7 @@
 #define RING_SIZE   (64 * 1024)   // 起動してからのログ（PSRAM）
 #define TAIL_SIZE   2048          // 再起動の直前のログ（RTC メモリ）
 #define ERR_SIZE    192
+#define CRASH_SIZE  512
 #define LOG_LINE_MAX    256
 #define RTC_MAGIC   0x4c4f4731u   // "LOG1"
 
@@ -40,6 +44,7 @@ static char s_prev_tail[TAIL_SIZE + 1];
 static char s_prev_err[ERR_SIZE];
 static char s_last_err[ERR_SIZE];
 static const char *s_reset_reason = "";
+static char s_crash[CRASH_SIZE];
 
 // 色付けのエスケープを除いた行の先頭が "E (" ならエラー
 static const char *strip_color(const char *s)
@@ -132,10 +137,38 @@ static const char *reason_name(esp_reset_reason_t r)
     }
 }
 
+// 前回クラッシュしたときにフラッシュに残した記録（core dump）から、理由・タスク・Backtrace を取り出す。
+// シリアルをつないでいなくても、クラッシュした場所を本体の設定ページで見られるようにする
+static void read_crash(void)
+{
+    if (esp_core_dump_image_check() != ESP_OK) {
+        return;
+    }
+    esp_core_dump_summary_t *sum = calloc(1, sizeof(*sum));
+    if (sum && esp_core_dump_get_summary(sum) == ESP_OK) {
+        char reason[160] = "";
+        if (esp_core_dump_get_panic_reason(reason, sizeof(reason)) != ESP_OK) {
+            snprintf(reason, sizeof(reason), "例外 %" PRIu32, sum->ex_info.exc_cause);
+        }
+        reason[strcspn(reason, "\r\n")] = 0;
+        int n = snprintf(s_crash, sizeof(s_crash), "%s（タスク %s、PC 0x%08" PRIx32 "）Backtrace:",
+                         reason, sum->exc_task, sum->exc_pc);
+        for (uint32_t i = 0; i < sum->exc_bt_info.depth && n > 0 && n < (int)sizeof(s_crash); i++) {
+            n += snprintf(s_crash + n, sizeof(s_crash) - n, " 0x%08" PRIx32, sum->exc_bt_info.bt[i]);
+        }
+        if (sum->exc_bt_info.corrupted && n > 0 && n < (int)sizeof(s_crash)) {
+            snprintf(s_crash + n, sizeof(s_crash) - n, " |<-CORRUPTED");
+        }
+    }
+    free(sum);
+    esp_core_dump_image_erase();  // 同じクラッシュを次の起動でも出さないように消す
+}
+
 void logbuf_init(void)
 {
     esp_reset_reason_t r = esp_reset_reason();
     s_reset_reason = reason_name(r);
+    read_crash();
 
     // 電源投入時の RTC メモリは不定なので使わない
     if (r != ESP_RST_POWERON && r != ESP_RST_BROWNOUT && s_rtc.magic == RTC_MAGIC) {
@@ -201,3 +234,4 @@ const char *logbuf_prev_tail(void) { return s_prev_tail; }
 const char *logbuf_prev_error(void) { return s_prev_err; }
 const char *logbuf_last_error(void) { return s_last_err; }
 const char *logbuf_reset_reason(void) { return s_reset_reason; }
+const char *logbuf_crash(void) { return s_crash; }

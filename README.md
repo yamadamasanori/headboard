@@ -18,13 +18,13 @@
 | `main/` | ファームウェアのソース（ESP-IDF / C） |
 | `main/Kconfig.projbuild` | ビルド時の設定（開発用に USB から設定できるようにするか、Home Assistant からの更新に使う配布元の URL） |
 | `components/mdns/` | mDNS（Espressif、Apache-2.0、mdns-v1.8.2 を同梱。`headboard-xxxxxx.local` の名前で本体を開くため） |
-| `partitions.csv` | フラッシュの区画（ファームウェア 4MB × 2 の OTA 構成） |
-| `components/microlink/` | Tailscale クライアント MicroLink（MIT、コミット 216da33 を同梱。認証失敗の検出と定期ログを減らすための小さな変更あり、`VERSION` 参照） |
+| `partitions.csv` | フラッシュの区画（ファームウェア 4MB × 2 の OTA 構成と、クラッシュの記録 256KB） |
+| `components/microlink/` | Tailscale クライアント MicroLink（MIT、コミット 216da33 を同梱。認証失敗の検出、定期ログを減らす、tailnet 経由の TCP でクラッシュする不具合の修正などの小さな変更あり、`VERSION` 参照） |
 | `sdkconfig.defaults*` | ビルド設定（共通 / ESP32-S3 用） |
 | `keys/headboard-signing-pubkey.pem` | ファームウェアの署名を確かめる公開鍵（秘密鍵はリポジトリに入れない。「ファームウェアの署名」参照） |
 | `web/index.html` | 書き込み・設定ページ。本体にも組み込まれ、本体の設定ページとしても使われる |
-| `web/firmware/headboard-led.bin` | ビルド済みファームウェア（ESP32-S3 用、アドレス 0 から書き込む一体型イメージ。USB での書き込み用） |
-| `web/firmware/headboard-led-ota.bin` | 同じファームウェアの更新用イメージ（本体の設定ページからの更新用） |
+| `web/firmware/headboard-led-ota.bin` | ビルド済みファームウェア（ESP32-S3 用のアプリ。USB での書き込みと、本体の設定ページからの更新の両方に使う） |
+| `web/firmware/headboard-led-boot.bin`, `headboard-led-otadata.bin` | USB で書き込むときに一緒に書き込むブートローダーとパーティション表、起動するアプリの選択（設定の保存領域には書き込まない） |
 | `web/manifest.json` | ESP Web Tools 用の定義 |
 | `web/vendor/esp-web-tools/` | ESP Web Tools 10.4.0（Apache-2.0）。CDN に頼らずオフラインでも動くよう同梱 |
 | `web/vendor/qrcode-generator/` | QR Code Generator 2.0.4（MIT）。本体ラベルの QR コード用 |
@@ -60,7 +60,7 @@ ESP32 のピンで LED を直接駆動することはできないので、ロジ
 
 | 押す長さ | 動作 | 状態表示 LED |
 |---|---|---|
-| 3 秒以上 | Wi-Fi の設定だけを消して再起動し、Bluetooth での設定を待つ（MQTT などの設定は残る） | 白・点灯 |
+| 3 秒以上 | Wi-Fi の設定だけを消して再起動し、Bluetooth での設定を待つ（MQTT などの設定は残る）。「Tailscale からだけ受け付ける」もオフに戻す | 白・点灯 |
 | 10 秒以上 | すべての設定と累計（点灯時間・起動回数など）を消して再起動（工場出荷時の状態） | 赤・点灯 |
 
 LED の色が変わったところで離すと、その動作をします。
@@ -100,6 +100,8 @@ Web Serial は HTTPS か localhost でしか動かないため、HTML ファイ�
 基板を USB で繋ぎ、「ESP32 に書き込む」を押してシリアルポートを選びます。初回は「消去」を選んでください。
 COM 端子でポートが表示されないときは、USB シリアル変換チップ（CH340 / CH343 / CP210x）のドライバを入れてください。書き込みが始まらないときは、BOOT ボタンを押したまま RST ボタンを押して離し、書き込みモードにしてから試してください。
 
+2.4.0 からは、USB で書き込んでも設定は消えません（「消去」を選んだときだけ消えます）。2.3.0 までは、USB で書き込むと「消去」を選ばなくても設定が消えていました。
+
 **2.0.0 より前の版から上げるとき:** フラッシュの区画を OTA 用に変えたため、一度だけ USB で「消去」を選んで書き込んでください。それまでの設定は消えるので、設定し直しが必要です。2.0.0 以降は、本体の設定ページから更新できます。
 
 ### 2. ラベルを印刷する（USB）
@@ -135,7 +137,7 @@ MQTT ブローカー（Home Assistant の Mosquitto アドオンなど）のア�
 - 本体は時計を持たないので、証明書の有効期限は確かめません（期限が切れても繋がります）。期限の前に作り直してください
 - Tailscale 経由の接続はもともと暗号化されていますが、TLS をオンにすれば、その場合も同じように証明書を確かめます
 
-- この設定ページは暗号化していない HTTP です。家庭内の LAN で使う前提です（Tailscale 経由で開けば、経路は暗号化されます）
+- この設定ページは暗号化していない HTTP です。家庭内の LAN で使う前提です（Tailscale 経由で開けば、経路は暗号化されます。Tailscale からだけ開けるようにもできます。「5. Tailscale を使う」参照）
 - 設定用コードを 5 回続けて間違えると、1 分間ログインできなくなります
 
 #### ファームウェアの更新（OTA）
@@ -143,7 +145,7 @@ MQTT ブローカー（Home Assistant の Mosquitto アドオンなど）のア�
 本体の設定ページの「ファームウェアの更新」で `web/firmware/headboard-led-ota.bin` を選んで「更新する」を押します。書き込みが終わると再起動します。
 
 - 新しいファームウェアが起動して Wi-Fi に繋がるまで（Wi-Fi 未設定なら起動するまで）に失敗すると、次の起動で前の版に自動で戻ります
-- `headboard-led.bin`（USB 用の一体型イメージ）や ESP32-S3 用でないファイルは、書き込む前に断ります
+- `headboard-led-boot.bin` などの USB 用のファイルや ESP32-S3 用でないファイルは、書き込む前に断ります
 - 2.3.0 からは、正しい鍵で署名したファームウェアだけを書き込みます（Home Assistant からの更新も同じ）。署名がないものや違う鍵のものは、書き込みの最後で断り、今の版のまま動き続けます。2.2.0 以前から 2.3.0 への更新は、まだ署名を確かめない版からなので、そのまま入ります
 
 Home Assistant の「設定 → 更新」からも更新できます（下の「6. Home Assistant で確認する」）。
@@ -155,6 +157,10 @@ Home Assistant の「設定 → 更新」からも更新できます（下の「
 ### ログの見方と MQTT に繋がらないとき
 
 本体の設定ページ（USB の設定ページでも同じ）の「動作確認」欄は自動で更新され、MQTT に繋がっていないときは、その理由が赤字で表示されます。起動してからの時間、前回の再起動の理由（電源投入・クラッシュ・ウォッチドッグなど）、空きメモリ（内蔵 RAM の今と起動してからの最小値、PSRAM）、直近のエラーと、前回の起動中の最後のエラーも表示されます。
+
+前回の起動がクラッシュで終わったときは、「前回のクラッシュ」にクラッシュの理由・タスク・Backtrace（アドレスの並び）が赤字で表示されます。クラッシュの記録をフラッシュに残しておき、次の起動で読み出すので、シリアルを繋いでいなくても分かります。アドレスは、同じ版をビルドした `build/headboard_led.elf` で関数と行に変換できます（`xtensa-esp32s3-elf-addr2line -pfiaC -e build/headboard_led.elf <アドレス…>`）。
+
+- クラッシュの記録の区画は 2.4.0 で追加しました。2.3.0 以前から本体の設定ページ（Wi-Fi）で更新した本体には区画がないので、一度 USB で書き込んでください（2.4.0 の書き込みページからなら設定は消えません）
 
 | 表示 | 主な原因 |
 |---|---|
@@ -183,6 +189,15 @@ Tailscale の途中経過のログは、通常は警告以上だけにしてい�
 3. MQTT ブローカーのホスト名に、Home Assistant の tailnet 上の名前（例: `homeassistant`）か tailnet のアドレス（`100.64.x.x`〜`100.127.x.x`）を入れると、Tailscale 経由で接続します。LAN の IP アドレスを入れた場合は、Tailscale の接続を待たずに LAN で直接繋ぎます。`homeassistant.local` のような LAN のホスト名も、Tailscale がオンのときは Tailscale の接続を待ってから繋ぎます（tailnet 上に同じ名前が無ければ、通常の DNS で探します）
 
 「動作確認」欄に Tailscale の状態と VPN の IP アドレスが表示されます。認証キーかホスト名を変えると、次の起動時に鍵を作り直して登録し直します。
+
+#### 本体の設定ページを Tailscale からだけ開けるようにする（任意）
+
+「Tailscale」欄の「本体の設定ページと更新を Tailscale からだけ受け付ける」をオンにすると、LAN から本体の設定ページ・WebSocket・ファームウェアの更新に繋いでも断ります（「Tailscale からだけ開けます」と表示）。設定用コードが漏れても、LAN 内からは設定も更新もできなくなります。
+
+- 先に、Tailscale で `http://<tailnet 上のホスト名>/` を開けることを確かめてからオンにしてください（オンにするときに確認が出ます）
+- Tailscale の ACL で、本体に繋げる端末を自分の端末と Home Assistant に絞っておくと、さらに安全です
+- Tailscale に繋がらなくなると、本体の設定ページは開けません（ライト・MQTT・Home Assistant からの更新はそのまま動きます）。戻すには、BOOT ボタンを 3 秒押して Wi-Fi の設定を消し、Bluetooth で設定し直します。これで LAN からも開けるようになります
+- Home Assistant からの更新（GitHub Pages から本体が取りに行く）と、MQTT の接続には関係しません。MQTT も Tailscale 経由にしたいときは、ブローカーに tailnet の名前かアドレスを指定します
 
 ### 6. Home Assistant で確認する
 
@@ -251,7 +266,7 @@ VS Code で「Reopen in Container」を選び、コンテナの中で次を実�
 sh tools/build.sh
 ```
 
-`web/firmware/`（USB 用の `headboard-led.bin` と更新用の `headboard-led-ota.bin`）と `web/manifest.json` も更新されます。署名用の秘密鍵（`secrets/headboard-signing-key.pem`）がないとビルドできません。`build.sh` は `idf.py set-target` で `sdkconfig` を作り直すので、`menuconfig` で開発用の設定をオンにしたときは、`build.sh` ではなく `idf.py build` のあとに `python tools/package_web.py` を実行してください。
+`web/firmware/`（アプリの `headboard-led-ota.bin` と、USB 用の `headboard-led-boot.bin`・`headboard-led-otadata.bin`）と `web/manifest.json` も更新されます。署名用の秘密鍵（`secrets/headboard-signing-key.pem`）がないとビルドできません。`build.sh` は `idf.py set-target` で `sdkconfig` を作り直すので、`menuconfig` で開発用の設定をオンにしたときは、`build.sh` ではなく `idf.py build` のあとに `python tools/package_web.py` を実行してください。
 
 PlatformIO（`platformio.ini`）の設定は残していますが、動作確認をしていない補助的な経路です。
 

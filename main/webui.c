@@ -4,6 +4,7 @@
 #include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
+#include <arpa/inet.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #include "app_config.h"
@@ -198,6 +199,44 @@ static void log_pump_task(void *arg)
 
 // ---------------------------------------------------------------- ページとファイル
 
+// 接続元が tailnet（100.64.0.0/10）か。IPv6 のソケットで受けた IPv4 の接続（::ffff:a.b.c.d）も見る
+static bool from_tailnet(httpd_req_t *req)
+{
+    struct sockaddr_storage addr;
+    socklen_t len = sizeof(addr);
+    if (getpeername(httpd_req_to_sockfd(req), (struct sockaddr *)&addr, &len) != 0) {
+        return false;
+    }
+    uint32_t ip;
+    if (addr.ss_family == AF_INET) {
+        ip = ntohl(((struct sockaddr_in *)&addr)->sin_addr.s_addr);
+    } else if (addr.ss_family == AF_INET6) {
+        const uint32_t *a = ((struct sockaddr_in6 *)&addr)->sin6_addr.un.u32_addr;
+        if (a[0] != 0 || a[1] != 0 || a[2] != htonl(0xffff)) {
+            return false;
+        }
+        ip = ntohl(a[3]);
+    } else {
+        return false;
+    }
+    return (ip & 0xffc00000) == 0x64400000;
+}
+
+// 「Tailscale からだけ開く」のとき、LAN からの接続を断る（断ったら true）
+static bool reject_lan(httpd_req_t *req)
+{
+    if (!g_cfg.tailnet_only || from_tailnet(req)) {
+        return false;
+    }
+    char msg[320];
+    snprintf(msg, sizeof(msg), "この本体の設定ページは Tailscale からだけ開けます（http://%s/）。"
+             "LAN から開くには、BOOT ボタンを 3 秒押して Wi-Fi の設定を消してください", g_cfg.ts_hostname);
+    httpd_resp_set_status(req, "403 Forbidden");
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_sendstr(req, msg);
+    return true;
+}
+
 static esp_err_t send_embedded(httpd_req_t *req, const char *type, const char *start, const char *end)
 {
     httpd_resp_set_type(req, type);
@@ -207,22 +246,34 @@ static esp_err_t send_embedded(httpd_req_t *req, const char *type, const char *s
 
 static esp_err_t h_index(httpd_req_t *req)
 {
+    if (reject_lan(req)) {
+        return ESP_OK;
+    }
     return send_embedded(req, "text/html; charset=utf-8", index_html_start, index_html_end);
 }
 
 static esp_err_t h_license(httpd_req_t *req)
 {
+    if (reject_lan(req)) {
+        return ESP_OK;
+    }
     return send_embedded(req, "text/plain; charset=utf-8", license_start, license_end);
 }
 
 static esp_err_t h_notices(httpd_req_t *req)
 {
+    if (reject_lan(req)) {
+        return ESP_OK;
+    }
     return send_embedded(req, "text/plain; charset=utf-8", notices_start, notices_end);
 }
 
 // ページが「本体から配信されている」ことを知るための情報（秘密は含めない）
 static esp_err_t h_info(httpd_req_t *req)
 {
+    if (reject_lan(req)) {
+        return ESP_OK;
+    }
     cJSON *o = cJSON_CreateObject();
     cJSON_AddStringToObject(o, "firmware", "headboard-led");
     cJSON_AddStringToObject(o, "version", FW_VERSION);
@@ -310,6 +361,9 @@ static void handle_ws_line(client_t *c, const char *line)
 
 static esp_err_t h_ws(httpd_req_t *req)
 {
+    if (req->method == HTTP_GET && reject_lan(req)) {
+        return ESP_FAIL;  // WebSocket にしない
+    }
     int fd = httpd_req_to_sockfd(req);
     if (req->method == HTTP_GET) {
         if (!add_client(fd)) {
@@ -376,6 +430,9 @@ static esp_err_t ota_fail(httpd_req_t *req, const char *status, const char *msg)
 
 static esp_err_t h_ota(httpd_req_t *req)
 {
+    if (reject_lan(req)) {
+        return ESP_OK;
+    }
     char token[40] = "";
     if (httpd_req_get_hdr_value_str(req, "X-Token", token, sizeof(token)) != ESP_OK || strcmp(token, s_token) != 0) {
         return ota_fail(req, "403 Forbidden", "ログインしてください");

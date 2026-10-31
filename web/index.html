@@ -154,6 +154,7 @@
           <div></div>
           <div><label for="ts_authkey">認証キー（tskey-auth-…）</label><input id="ts_authkey" type="password" maxlength="127"></div>
           <div><label for="ts_hostname">tailnet 上のホスト名</label><input id="ts_hostname" type="text" maxlength="63" pattern="[a-z0-9][a-z0-9\-]*"></div>
+          <div><label><input id="tailnet_only" type="checkbox"> 本体の設定ページと更新を Tailscale からだけ受け付ける（LAN からは開けなくなる）</label></div>
         </div>
         <p class="note">認証キーは Tailscale 管理画面の Settings → Keys で作成します。MQTT ブローカーのホスト名に tailnet の名前（例: homeassistant）か tailnet のアドレス（100.64〜100.127）を入れると、Tailscale 経由で接続します。IP アドレス以外のホスト名は、LAN の名前でも Tailscale の接続を待ってから繋ぎます。</p>
       </fieldset>
@@ -587,6 +588,7 @@ async function showLabel(h) {
 }
 $("btnPrint").addEventListener("click", () => window.print());
 
+let loadedTailnetOnly = false;  // 読み込んだときの「Tailscale からだけ」（オンにするときだけ確かめる）
 function fillForm(c) {
   for (const k of textFields) if (k in c) $(k).value = c[k];
   for (const k of numFields) if (k in c) $(k).value = c[k];
@@ -594,6 +596,7 @@ function fillForm(c) {
   $("mqtt_tls").checked = !!c.mqtt_tls;
   $("mqttTlsArea").hidden = !c.mqtt_tls;
   $("ts_enabled").checked = !!c.ts_enabled;
+  $("tailnet_only").checked = loadedTailnetOnly = !!c.tailnet_only;
   $("sled_always_on").checked = !!c.sled_always_on;
   $("log_verbose").checked = !!c.log_verbose;
   for (const k of secretFields) {
@@ -611,11 +614,14 @@ function showStatus(s) {
     + (s.tailscale && s.tailscale.enabled ? ` ／ Tailscale: ${yn(s.tailscale.state === "connected")}${s.tailscale.ip ? " (" + s.tailscale.ip + ")" : " (" + s.tailscale.state + ")"}` : "")
     + (!s.mqtt_connected && s.mqtt_error ? `<br><span class="mqtt-err">MQTT: ${escapeHtml(s.mqtt_error)}</span>` : "")
     + (s.status_led ? `<br>状態表示 LED: ${indicatorNames[s.status_led] || s.status_led}` : "")
-    + (s.ip && s.hostname ? `<br>本体の設定ページ: <a href="http://${s.hostname}.local/" target="_blank">http://${s.hostname}.local/</a>（つながらないときは <a href="http://${s.ip}/" target="_blank">http://${s.ip}/</a>）` : "")
+    + (s.tailnet_only
+      ? (s.tailscale && s.tailscale.ip ? `<br>本体の設定ページ（Tailscale からだけ）: <a href="http://${s.tailscale.hostname}/" target="_blank">http://${escapeHtml(s.tailscale.hostname)}/</a>（つながらないときは <a href="http://${s.tailscale.ip}/" target="_blank">http://${s.tailscale.ip}/</a>）` : "<br>本体の設定ページ: Tailscale からだけ（Tailscale に未接続）")
+      : (s.ip && s.hostname ? `<br>本体の設定ページ: <a href="http://${s.hostname}.local/" target="_blank">http://${s.hostname}.local/</a>（つながらないときは <a href="http://${s.ip}/" target="_blank">http://${s.ip}/</a>）` : ""))
     + (s.free_internal !== undefined ? `<br>空きメモリ: 内蔵 RAM ${kb(s.free_internal)}（起動してからの最小 ${kb(s.min_free_internal)}）${s.free_psram ? "、PSRAM " + kb(s.free_psram) : ""}` : "")
     + (up ? `<br>起動してから ${up}（起動の理由: ${escapeHtml(s.reset_reason || "")}）` : "")
     + (s.last_error ? `<br><span class="mqtt-err">最後のエラー: ${escapeHtml(s.last_error)}</span>` : "")
     + (s.prev_error ? `<br><span class="note">前回の起動の最後のエラー: ${escapeHtml(s.prev_error)}</span>` : "")
+    + (s.crash ? `<br><span class="mqtt-err">前回のクラッシュ: ${escapeHtml(s.crash)}</span>` : "")
     + `<br><span class="note">MQTT トピック: ${escapeHtml(s.mqtt_base_topic)}/…</span>`;
   for (const [id, l] of Object.entries(s.lights || {})) {
     const v = l.state === "ON" ? l.brightness : 0;
@@ -634,6 +640,13 @@ $("cfgForm").addEventListener("submit", async (e) => {
   cfg.pwm_invert = $("pwm_invert").checked;
   cfg.mqtt_tls = $("mqtt_tls").checked;
   cfg.ts_enabled = $("ts_enabled").checked;
+  cfg.tailnet_only = $("tailnet_only").checked;
+  if (cfg.tailnet_only && !loadedTailnetOnly) {
+    const url = `http://${cfg.ts_hostname || "（tailnet 上のホスト名）"}/`;
+    if (!confirm(`保存すると、LAN からは本体の設定ページを開けなくなります（Tailscale で ${url} を開きます）。\n`
+      + "先に Tailscale でこのページを開けることを確かめてください。\n"
+      + "元に戻すには、BOOT ボタンを 3 秒押して Wi-Fi の設定を消し、Bluetooth で設定し直します。よろしいですか？")) return;
+  }
   cfg.sled_always_on = $("sled_always_on").checked;
   cfg.log_verbose = $("log_verbose").checked;
   try {

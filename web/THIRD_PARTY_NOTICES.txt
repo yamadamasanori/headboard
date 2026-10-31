@@ -5,7 +5,7 @@
 配布物ごとの内訳:
 
 - **ソース（このリポジトリ）**: 1・2・4・5 を同梱しています
-- **ファームウェア（`web/firmware/headboard-led.bin`、`headboard-led-ota.bin`）**: 1・3・4 が組み込まれています。本体の設定ページとして 5 も組み込まれています
+- **ファームウェア（`web/firmware/headboard-led-ota.bin`、`headboard-led-boot.bin`）**: 1・3・4 が組み込まれています。本体の設定ページとして 5 も組み込まれています
 - **設定ページ（`web/`）**: 2・5 を使っています
 
 ---

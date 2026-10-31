@@ -2,3 +2,5 @@ MicroLink v2 (https://github.com/CamM2325/microlink) commit 216da3300f0493b08602
 headboard-led local patches:
 - auth_error flag + microlink_auth_failed() (see ml_coord.c do_register)
 - ml_derp.c: periodic HEARTBEAT log lowered from WARN to DEBUG
+- wireguardif.c: pass decrypted packets to netif->input (tcpip_input) instead of calling ip_input
+  directly from the wg_mgr task (TCP over the tailnet, e.g. MQTT, crashed with an lwIP assert)

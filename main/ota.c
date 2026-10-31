@@ -28,7 +28,7 @@ bool ota_check_header(const uint8_t *buf, size_t len, char *err, size_t err_len)
     }
     const esp_app_desc_t *d = (const esp_app_desc_t *)(buf + desc_off);
     if (d->magic_word != ESP_APP_DESC_MAGIC_WORD) {
-        // 先頭がブートローダー（書き込み用の結合ファイル headboard-led.bin）だとここに来る
+        // 先頭がブートローダー（USB 書き込み用の headboard-led-boot.bin や、2.3.0 までの結合ファイル）だとここに来る
         snprintf(err, err_len, "更新用のファイルではありません。headboard-led-ota.bin を選んでください");
         return false;
     }

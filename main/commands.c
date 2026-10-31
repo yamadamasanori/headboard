@@ -88,6 +88,7 @@ static void send_status(const sink_t *k)
         leds_state_to_json(i, cJSON_AddObjectToObject(lights, leds_key(i)));
     }
     cJSON_AddStringToObject(o, "status_led", status_led_indicator());
+    cJSON_AddBoolToObject(o, "tailnet_only", g_cfg.tailnet_only);
     cJSON_AddNumberToObject(o, "free_heap", esp_get_free_heap_size());
     // TLS などは内蔵 RAM から取るので、PSRAM とは分けて返す
     cJSON_AddNumberToObject(o, "free_internal", heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
@@ -97,6 +98,7 @@ static void send_status(const sink_t *k)
     cJSON_AddStringToObject(o, "reset_reason", logbuf_reset_reason());
     cJSON_AddStringToObject(o, "last_error", logbuf_last_error());
     cJSON_AddStringToObject(o, "prev_error", logbuf_prev_error());
+    cJSON_AddStringToObject(o, "crash", logbuf_crash());
     send(k, o);
 }
 
