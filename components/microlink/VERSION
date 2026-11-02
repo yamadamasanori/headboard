@@ -4,3 +4,19 @@ headboard-led local patches:
 - ml_derp.c: periodic HEARTBEAT log lowered from WARN to DEBUG
 - wireguardif.c: pass decrypted packets to netif->input (tcpip_input) instead of calling ip_input
   directly from the wg_mgr task (TCP over the tailnet, e.g. MQTT, crashed with an lwIP assert)
+- Upstream PRs applied (all unmerged upstream as of 2026-10-31):
+  - #37 ml_derp_connect(): check mbedTLS setup errors and free TLS state on every failure.
+    The PR uses `goto fail` without defining the label; the label was added here, and the
+    nine failure paths after the HTTP upgrade (ServerKey/ClientInfo/ServerInfo) also go there
+  - #30 per-packet datapath logging moved to DEBUG (the ml_derp.c HEARTBEAT hunk was already
+    applied locally)
+  - #29 ML_DERP_REGION is a Kconfig option (sdkconfig.defaults sets 7, Tokyo)
+  - #28 commit 2 only (0de347e): udp_sendto, udp_new, netif_list/netif_set_up and
+    netif_set_link_up/down run on tcpip_thread. Commits 1 and 3 are the same as the
+    netif->input fix above
+  - #31 cache the DISCO X25519 shared secret
+  - #32 deeper WG/DISCO RX queues, blocking receive in ml_wg_mgr, drain the DISCO socket
+    (the trailing vTaskDelay hunk was applied by hand after #30)
+  - #21 don't install unvalidated peer endpoints at peer-add (DERP until DISCO validates)
+- Known remaining: wireguardif_network_rx() still runs on the wg_mgr task, so peer keypair
+  state is shared with the tcpip_thread output path without a lock (headboard issue #1)

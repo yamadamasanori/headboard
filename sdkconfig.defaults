@@ -28,6 +28,8 @@ CONFIG_HTTPD_MAX_URI_LEN=256
 
 # ---- Tailscale (MicroLink) ----
 CONFIG_ML_ENABLE_CONFIG_HTTPD=n
+# 中継（DERP）の既定の地域を東京にする（MicroLink の既定は 9 のダラス）
+CONFIG_ML_DERP_REGION=7
 # WireGuard / Noise に必要な設定
 CONFIG_LWIP_MAX_SOCKETS=16
 CONFIG_LWIP_SO_RCVBUF=y

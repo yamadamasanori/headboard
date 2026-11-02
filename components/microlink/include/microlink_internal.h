@@ -61,8 +61,13 @@ extern "C" {
 
 /* Queue depths */
 #define ML_DERP_TX_QUEUE_DEPTH  16
-#define ML_DISCO_RX_QUEUE_DEPTH 8
-#define ML_WG_RX_QUEUE_DEPTH    8
+#define ML_DISCO_RX_QUEUE_DEPTH 16
+/* Deep enough to hold a TCP window's worth of packets while the manager task
+ * is busy with a handshake or a DISCO probe round. The enqueue in
+ * ml_net_io.c is non-blocking, so an overflow here is a silent drop; at 8 a
+ * bulk transfer lost enough packets to collapse TCP. Each slot holds a
+ * pointer and a few fields, not the packet. */
+#define ML_WG_RX_QUEUE_DEPTH    64
 #define ML_STUN_RX_QUEUE_DEPTH  4
 #define ML_COORD_CMD_QUEUE_DEPTH 4
 #define ML_PEER_UPDATE_QUEUE_DEPTH 400
@@ -73,8 +78,14 @@ extern "C" {
 #define ML_MAX_PACKET_SIZE      1500
 #define ML_DERP_MAX_FRAME       (ML_MAX_PACKET_SIZE + 64)
 
-/* DERP */
-#define ML_DERP_REGION          9       /* Dallas (dfw) */
+/* DERP - preferred region is Kconfig-driven (default 9/Dallas) rather than
+ * hardcoded, so a deployment relying on DERP-relayed traffic (e.g. a peer
+ * behind CGNAT with no direct path) elsewhere in the world doesn't pay
+ * needless latency relaying through Dallas - see ML_DERP_REGION's Kconfig
+ * help text. ML_DERP_HOST/_PORT stay hardcoded: they're only a bootstrap
+ * fallback used before the first DERPMap arrives (ml_derp.c's ml_derp_connect
+ * uses the real per-region host from the parsed DERPMap once available). */
+#define ML_DERP_REGION          CONFIG_ML_DERP_REGION
 #define ML_DERP_HOST            "derp9e.tailscale.com"
 #define ML_DERP_PORT            443
 

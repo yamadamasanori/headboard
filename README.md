@@ -19,7 +19,7 @@
 | `main/Kconfig.projbuild` | ビルド時の設定（開発用に USB から設定できるようにするか、Home Assistant からの更新に使う配布元の URL） |
 | `components/mdns/` | mDNS（Espressif、Apache-2.0、mdns-v1.8.2 を同梱。`headboard-xxxxxx.local` の名前で本体を開くため） |
 | `partitions.csv` | フラッシュの区画（ファームウェア 4MB × 2 の OTA 構成と、クラッシュの記録 256KB） |
-| `components/microlink/` | Tailscale クライアント MicroLink（MIT、コミット 216da33 を同梱。認証失敗の検出、定期ログを減らす、tailnet 経由の TCP でクラッシュする不具合の修正などの小さな変更あり、`VERSION` 参照） |
+| `components/microlink/` | Tailscale クライアント MicroLink（MIT、コミット 216da33 を同梱。認証失敗の検出、定期ログを減らす、tailnet 経由の TCP でクラッシュする不具合の修正と、本家で未マージの修正（スレッドの安全性、DERP の接続失敗時のメモリの解放、大きな転送での取りこぼしなど）を取り込んだ変更あり、`VERSION` 参照） |
 | `sdkconfig.defaults*` | ビルド設定（共通 / ESP32-S3 用） |
 | `keys/headboard-signing-pubkey.pem` | ファームウェアの署名を確かめる公開鍵（秘密鍵はリポジトリに入れない。「ファームウェアの署名」参照） |
 | `web/index.html` | 書き込み・設定ページ。本体にも組み込まれ、本体の設定ページとしても使われる |
@@ -324,6 +324,8 @@ ESP32 で動く Tailscale クライアントは、コミュニティ製の [Micr
 
 - ESP32-S3 N16R8 では PSRAM を使い、MicroLink の標準値（受信バッファ 512KB、ピア 16 台）で動かします
 - 認証キーが拒否されたことを状態表示 LED で知らせるため、また数秒ごとの定期ログを減らすため、MicroLink に小さな変更を加えています（`components/microlink/VERSION` に記載）
+- 本家にまだ取り込まれていない修正の PR のうち、この本体で役立つものを取り込んでいます（同じく `VERSION` に記載）
+- 中継（DERP）の既定の地域は東京（7）にしています。ほかの地域で使うときは `sdkconfig.defaults` の `CONFIG_ML_DERP_REGION` を変えてください
 - MicroLink は公式のクライアントではないため、Tailscale 側の仕様変更で動かなくなる可能性があります
 
 ## ライセンス

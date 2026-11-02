@@ -53,8 +53,11 @@ static void route_udp_packet(microlink_t *ml, uint8_t *data, size_t len,
                               uint32_t src_ip, uint16_t src_port) {
     pkt_type_t type = classify_packet(data, len);
 
-    /* Log ALL direct UDP packets for debugging */
-    ESP_LOGI(TAG, "UDP RX: %d bytes from %d.%d.%d.%d:%d type=%s hdr=%02x",
+    /* Per-packet trace, kept at DEBUG. At INFO this line is emitted for every
+     * tunnelled packet, and the UART write blocks the receive task for roughly
+     * 6 ms per packet at 115200 baud — on its own that caps the datapath at
+     * ~165 pps and backs the lwIP UDP mailbox up behind it. */
+    ESP_LOGD(TAG, "UDP RX: %d bytes from %d.%d.%d.%d:%d type=%s hdr=%02x",
              (int)len,
              (int)((src_ip >> 24) & 0xFF), (int)((src_ip >> 16) & 0xFF),
              (int)((src_ip >> 8) & 0xFF), (int)(src_ip & 0xFF),
@@ -142,20 +145,25 @@ void ml_net_io_task(void *arg) {
         }
         if (sel == 0) continue;  /* Timeout */
 
-        /* Process DISCO UDP socket */
+        /* Process DISCO UDP socket. This socket carries every tunnelled
+         * packet, so drain it rather than taking one datagram per select()
+         * round: that put a full select() and a scheduler round trip in front
+         * of each packet. Bounded so one busy socket cannot starve the rest
+         * of the loop. */
         if (ml->disco_sock4 >= 0 && FD_ISSET(ml->disco_sock4, &read_fds)) {
-            struct sockaddr_in src_addr;
-            socklen_t addr_len = sizeof(src_addr);
-            int n = ml_recvfrom(ml->disco_sock4, udp_buf, sizeof(udp_buf), 0,
-                             (struct sockaddr *)&src_addr, &addr_len);
-            if (n > 0) {
+            for (int drained = 0; drained < 32; drained++) {
+                struct sockaddr_in src_addr;
+                socklen_t addr_len = sizeof(src_addr);
+                int n = ml_recvfrom(ml->disco_sock4, udp_buf, sizeof(udp_buf),
+                                    MSG_DONTWAIT,
+                                    (struct sockaddr *)&src_addr, &addr_len);
+                if (n <= 0) break;
                 uint8_t *pkt_data = malloc(n);
-                if (pkt_data) {
-                    memcpy(pkt_data, udp_buf, n);
-                    uint32_t src_ip = ntohl(src_addr.sin_addr.s_addr);
-                    uint16_t src_port = ntohs(src_addr.sin_port);
-                    route_udp_packet(ml, pkt_data, n, src_ip, src_port);
-                }
+                if (!pkt_data) break;
+                memcpy(pkt_data, udp_buf, n);
+                uint32_t src_ip = ntohl(src_addr.sin_addr.s_addr);
+                uint16_t src_port = ntohs(src_addr.sin_port);
+                route_udp_packet(ml, pkt_data, n, src_ip, src_port);
             }
         }
 

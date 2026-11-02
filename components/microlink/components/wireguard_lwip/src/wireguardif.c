@@ -72,6 +72,50 @@ void wireguardif_disable_socket_bind(void) {
 	g_disable_socket_bind = true;
 }
 
+// netif_set_link_up() is core lwIP netif state and must only run on
+// tcpip_thread (confirmed on real hardware via CONFIG_LWIP_CHECK_THREAD_SAFETY,
+// which asserts immediately otherwise). Both call sites below run on whatever
+// task calls wireguardif_network_rx() (this project's ml_wg_mgr task, never
+// tcpip_thread - handshake messages are processed here directly, never via
+// the tcpip_input()-based inner-IP-packet path), so this always needs
+// dispatching, unlike wg_udp_output_cb's context-dependent case. Fire-and-forget
+// (tcpip_callback(), no wait): nothing here depends on netif_set_link_up()
+// having completed before this function returns, so there's no reason to pay
+// for a blocking round-trip on every handshake completion.
+static void netif_set_link_up_in_tcpip(void *arg) {
+	netif_set_link_up((struct netif *)arg);
+}
+static void wireguardif_mark_link_up(struct netif *netif) {
+	// One call site is per-data-packet (wireguard_process_data_message()'s
+	// defensive "make sure link is reported as up"), not just per-handshake -
+	// skip the tcpip_callback() dispatch entirely once the flag is already
+	// set, so the common case (link already up) costs one flag read, not a
+	// callback queued on every packet. Reading netif->flags without the core
+	// lock is fine here: it's a single bit that only ever transitions
+	// unset->set for the life of a session, so a stale read costs at most one
+	// redundant (still correct) dispatch, never a wrong result.
+	if (netif->flags & NETIF_FLAG_LINK_UP) {
+		return;
+	}
+	tcpip_callback(netif_set_link_up_in_tcpip, netif);
+}
+
+// Same thread-safety requirement and same reasoning as wireguardif_mark_link_up()
+// above - both of this function's call sites (wireguardif_tmr() and
+// wireguardif_periodic(), the periodic per-peer keepalive/rekey/timeout sweep)
+// run once per tick, not once per packet, but still worth skipping the
+// dispatch once the flag is already clear (the common steady-state case,
+// either "link up" or "link already reported down").
+static void netif_set_link_down_in_tcpip(void *arg) {
+	netif_set_link_down((struct netif *)arg);
+}
+static void wireguardif_mark_link_down(struct netif *netif) {
+	if (!(netif->flags & NETIF_FLAG_LINK_UP)) {
+		return;
+	}
+	tcpip_callback(netif_set_link_down_in_tcpip, netif);
+}
+
 bool wireguardif_is_wireguard_packet(const uint8_t *data, size_t len) {
 	if (len < 4) return false;
 	// WireGuard message types are 1-4 in the first 32-bit LE word
@@ -391,7 +435,7 @@ static void wireguardif_process_response_message(struct wireguard_device *device
 		wireguardif_send_keepalive(device, peer);
 
 		// Set the IF-UP flag on netif
-		netif_set_link_up(device->netif);
+		wireguardif_mark_link_up(device->netif);
 		printf("[WG] *** WIREGUARD SESSION ESTABLISHED wg_idx=%u ***\n", wg_idx);
 	} else {
 		// Packet bad
@@ -482,7 +526,7 @@ static void wireguardif_process_data_message(struct wireguard_device *device, st
 					}
 
 					// Make sure that link is reported as up
-					netif_set_link_up(device->netif);
+					wireguardif_mark_link_up(device->netif);
 
 					if (pbuf->tot_len > 0) {
 						//4a. Once the packet payload is decrypted, the interface has a plaintext packet. If this is not an IP packet, it is dropped.
@@ -761,8 +805,9 @@ void wireguardif_network_rx(void *arg, struct udp_pcb *pcb, struct pbuf *p, cons
 
 	uint8_t type = wireguard_get_message_type(data, len);
 
-	// Always log incoming WG packets (critical for debugging handshake issues)
-	printf("[WG_RX] type=%d (%s) len=%u from %s:%u\n",
+	// Per-packet trace. This must stay compiled out by default: a raw printf
+	// here blocks the datapath on the UART for every single packet received.
+	WG_DEBUG("[WG_RX] type=%d (%s) len=%u from %s:%u\n",
 		type,
 		type == 1 ? "INIT" : type == 2 ? "RESP" : type == 3 ? "COOKIE" : type == 4 ? "DATA" : "?",
 		(unsigned)len,
@@ -1161,7 +1206,7 @@ static void wireguardif_tmr(void *arg) {
 
 	if (!link_up) {
 		// Clear the IF-UP flag on netif
-		netif_set_link_down(device->netif);
+		wireguardif_mark_link_down(device->netif);
 	}
 }
 
@@ -1211,7 +1256,7 @@ void wireguardif_periodic(struct netif *netif) {
 		}
 	}
 	if (!link_up) {
-		netif_set_link_down(device->netif);
+		wireguardif_mark_link_down(device->netif);
 	}
 }
 

@@ -24,6 +24,7 @@
 #include "lwip/ip_addr.h"
 #include "lwip/ip.h"
 #include "lwip/tcpip.h"
+#include "arch/sys_arch.h" /* sys_thread_tcpip() - detects whether we're already on tcpip_thread */
 #include "nacl_box.h"
 #include "wireguardif.h"
 #include "wireguard.h"
@@ -138,7 +139,7 @@ static err_t wg_derp_output_cb(const uint8_t *peer_public_key,
                 break;
             }
         }
-        ESP_LOGI(TAG, "WG INIT -> %s len=%d key=%02x%02x%02x%02x%02x%02x%02x%02x",
+        ESP_LOGD(TAG, "WG INIT -> %s len=%d key=%02x%02x%02x%02x%02x%02x%02x%02x",
                  hostname, (int)len,
                  peer_public_key[0], peer_public_key[1],
                  peer_public_key[2], peer_public_key[3],
@@ -150,18 +151,18 @@ static err_t wg_derp_output_cb(const uint8_t *peer_public_key,
             init_dump_count++;
             /* WG handshake init: type(1) reserved(3) sender(4) ephemeral(32)
              * enc_static(48) enc_timestamp(28) mac1(16) mac2(16) = 148 */
-            ESP_LOGI(TAG, "  type=%02x res=%02x%02x%02x sender=%02x%02x%02x%02x",
+            ESP_LOGD(TAG, "  type=%02x res=%02x%02x%02x sender=%02x%02x%02x%02x",
                      data[0], data[1], data[2], data[3],
                      data[4], data[5], data[6], data[7]);
-            ESP_LOGI(TAG, "  ephemeral=%02x%02x%02x%02x...%02x%02x%02x%02x",
+            ESP_LOGD(TAG, "  ephemeral=%02x%02x%02x%02x...%02x%02x%02x%02x",
                      data[8], data[9], data[10], data[11],
                      data[36], data[37], data[38], data[39]);
-            ESP_LOGI(TAG, "  mac1=%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x",
+            ESP_LOGD(TAG, "  mac1=%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x",
                      data[116], data[117], data[118], data[119],
                      data[120], data[121], data[122], data[123],
                      data[124], data[125], data[126], data[127],
                      data[128], data[129], data[130], data[131]);
-            ESP_LOGI(TAG, "  mac2=%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x",
+            ESP_LOGD(TAG, "  mac2=%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x",
                      data[132], data[133], data[134], data[135],
                      data[136], data[137], data[138], data[139],
                      data[140], data[141], data[142], data[143],
@@ -181,6 +182,23 @@ static err_t wg_derp_output_cb(const uint8_t *peer_public_key,
  * on that thread. */
 static struct udp_pcb *s_wg_output_pcb = NULL;
 
+/* Context for dispatching udp_sendto() onto tcpip_thread when wg_udp_output_cb
+ * isn't already running there. */
+typedef struct {
+    struct udp_pcb *pcb;
+    struct pbuf *p;
+    ip_addr_t dst;
+    u16_t port;
+    err_t result;
+    SemaphoreHandle_t done;
+} wg_udp_send_ctx_t;
+
+static void wg_udp_sendto_in_tcpip(void *arg) {
+    wg_udp_send_ctx_t *sctx = (wg_udp_send_ctx_t *)arg;
+    sctx->result = udp_sendto(sctx->pcb, sctx->p, &sctx->dst, sctx->port);
+    xSemaphoreGive(sctx->done);
+}
+
 static err_t wg_udp_output_cb(uint32_t dest_ip, uint16_t dest_port,
                                 const uint8_t *data, size_t len, void *ctx) {
     microlink_t *ml = (microlink_t *)ctx;
@@ -188,14 +206,13 @@ static err_t wg_udp_output_cb(uint32_t dest_ip, uint16_t dest_port,
 
     /* Log WG packets sent via direct UDP */
     uint32_t ip_host = ntohl(dest_ip);
-    ESP_LOGI(TAG, "WG UDP TX: %d bytes -> %d.%d.%d.%d:%d type=%d",
+    ESP_LOGD(TAG, "WG UDP TX: %d bytes -> %d.%d.%d.%d:%d type=%d",
              (int)len,
              (int)((ip_host >> 24) & 0xFF), (int)((ip_host >> 16) & 0xFF),
              (int)((ip_host >> 8) & 0xFF), (int)(ip_host & 0xFF),
              (int)dest_port,
              len >= 1 ? data[0] : -1);
 
-    /* Use raw PCB to send — safe from any thread context */
     if (!s_wg_output_pcb) return ERR_CONN;
 
     struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, len, PBUF_RAM);
@@ -206,7 +223,40 @@ static err_t wg_udp_output_cb(uint32_t dest_ip, uint16_t dest_port,
     IP_SET_TYPE_VAL(dst, IPADDR_TYPE_V4);
     ip4_addr_set_u32(ip_2_ip4(&dst), dest_ip);  /* already network byte order */
 
-    err_t err = udp_sendto(s_wg_output_pcb, p, &dst, dest_port);
+    /* udp_sendto() is raw lwIP core API - not thread-safe unless called from
+     * tcpip_thread. This callback runs from two different contexts: from
+     * tcpip_thread itself (when an app socket's send routes through the WG
+     * netif) and directly from ml_wg_mgr's own task (handshakes, keepalives,
+     * periodic housekeeping - confirmed on real hardware via
+     * CONFIG_LWIP_CHECK_THREAD_SAFETY, which caught this exact call during a
+     * one-shot handshake triggered from process_disco_pong()). Calling
+     * tcpip_callback() and blocking for the result when *already* on
+     * tcpip_thread would deadlock (tcpip_thread can't service its own queued
+     * callback while blocked waiting on it) - hence the explicit check
+     * rather than always dispatching. pbuf_alloc()/pbuf_free() aren't core
+     * state and don't need this - only the actual PCB send does. */
+    err_t err;
+    if (sys_thread_tcpip(LWIP_CORE_LOCK_QUERY_HOLDER)) {
+        err = udp_sendto(s_wg_output_pcb, p, &dst, dest_port);
+    } else {
+        wg_udp_send_ctx_t sctx = {
+            .pcb = s_wg_output_pcb, .p = p, .dst = dst, .port = dest_port,
+            .done = xSemaphoreCreateBinary(),
+        };
+        if (!sctx.done) {
+            pbuf_free(p);
+            return ERR_MEM;
+        }
+        err_t cb_err = tcpip_callback(wg_udp_sendto_in_tcpip, &sctx);
+        if (cb_err != ERR_OK) {
+            vSemaphoreDelete(sctx.done);
+            pbuf_free(p);
+            return cb_err;
+        }
+        xSemaphoreTake(sctx.done, portMAX_DELAY);
+        vSemaphoreDelete(sctx.done);
+        err = sctx.result;
+    }
     pbuf_free(p);
     return err;
 }
@@ -214,6 +264,49 @@ static err_t wg_udp_output_cb(uint32_t dest_ip, uint16_t dest_port,
 /* ============================================================================
  * WireGuard Interface Initialization
  * ========================================================================== */
+
+/* Splices netif into lwIP's global netif_list and brings it up. Like
+ * netif_set_up()/netif_set_link_up() themselves, direct netif_list
+ * manipulation is core lwIP state and must only happen on tcpip_thread -
+ * confirmed on real hardware via CONFIG_LWIP_CHECK_THREAD_SAFETY, which
+ * asserts immediately if this runs anywhere else (this used to run inline
+ * on ml_wg_mgr's own task). Dispatched via tcpip_callback() + a semaphore,
+ * matching the same pattern ml_zerocopy.c already uses for its own PCB
+ * setup - this runs once at startup, not per-packet, so the round-trip
+ * cost is irrelevant. */
+typedef struct {
+    struct netif *netif;
+    SemaphoreHandle_t done;
+} wg_netif_up_ctx_t;
+
+static void wg_netif_bring_up_in_tcpip(void *arg) {
+    wg_netif_up_ctx_t *ctx = (wg_netif_up_ctx_t *)arg;
+    ctx->netif->next = netif_list;
+    netif_list = ctx->netif;
+    netif_set_up(ctx->netif);
+    netif_set_link_up(ctx->netif);
+    xSemaphoreGive(ctx->done);
+}
+
+/* udp_new() (raw lwIP PCB allocation) has the same tcpip_thread-only
+ * requirement - confirmed via the same CONFIG_LWIP_CHECK_THREAD_SAFETY
+ * assertion once wg_netif_bring_up_in_tcpip() above stopped masking it.
+ * Same dispatch pattern; only touches the module-static s_wg_output_pcb,
+ * so no per-call context struct needed beyond the semaphore. */
+static SemaphoreHandle_t s_wg_output_pcb_done;
+static void wg_output_pcb_create_in_tcpip(void *arg) {
+    (void)arg;
+    s_wg_output_pcb = udp_new();
+    if (s_wg_output_pcb) {
+        /* Set source port to 51820 (matching DISCO socket) WITHOUT calling
+         * udp_bind — avoids registering for input which would steal WG
+         * responses from the DISCO BSD socket. udp_sendto uses local_port. */
+        s_wg_output_pcb->local_port = 51820;
+        /* DSCP 46 (EF) → WMM AC_VO for low-latency WiFi scheduling */
+        s_wg_output_pcb->tos = 0xB8;
+    }
+    xSemaphoreGive(s_wg_output_pcb_done);
+}
 
 static esp_err_t wg_init_interface(microlink_t *ml) {
     /* Convert our WG private key to base64 */
@@ -264,28 +357,46 @@ static esp_err_t wg_init_interface(microlink_t *ml) {
      * callback uses raw udp_sendto (not BSD sendto) to avoid deadlock. */
     netif->input = tcpip_input;
 
-    /* Add to lwIP netif list (bypass netif_add which wants init callback) */
-    netif->next = netif_list;
-    netif_list = netif;
-
-    /* Bring interface up */
-    netif_set_up(netif);
-    netif_set_link_up(netif);
+    /* Add to lwIP netif list and bring up on tcpip_thread (bypass netif_add
+     * which wants init callback) - see wg_netif_bring_up_in_tcpip() above. */
+    {
+        wg_netif_up_ctx_t ctx = { .netif = netif, .done = xSemaphoreCreateBinary() };
+        if (!ctx.done) {
+            ESP_LOGE(TAG, "Failed to allocate netif-up semaphore");
+            free(netif);
+            return ESP_FAIL;
+        }
+        err_t cb_err = tcpip_callback(wg_netif_bring_up_in_tcpip, &ctx);
+        if (cb_err != ERR_OK) {
+            ESP_LOGE(TAG, "tcpip_callback failed to queue netif bring-up: %d", cb_err);
+            vSemaphoreDelete(ctx.done);
+            free(netif);
+            return ESP_FAIL;
+        }
+        xSemaphoreTake(ctx.done, portMAX_DELAY);
+        vSemaphoreDelete(ctx.done);
+    }
 
     /* Create raw UDP PCB for WG output (avoids BSD sendto deadlock on TCPIP
-     * thread).  Bind to port 51820 to match the DISCO socket source port.
-     * The existing BSD disco_sock4 is only used from the wg_mgr task for
-     * DISCO/STUN; this raw PCB is used from the TCPIP thread for WG output. */
+     * thread).  Bind to port 51820 to match the DISCO socket source port. */
     if (!s_wg_output_pcb) {
-        s_wg_output_pcb = udp_new();
-        if (s_wg_output_pcb) {
-            /* Set source port to 51820 (matching DISCO socket) WITHOUT calling
-             * udp_bind — avoids registering for input which would steal WG
-             * responses from the DISCO BSD socket. udp_sendto uses local_port. */
-            s_wg_output_pcb->local_port = 51820;
-            /* DSCP 46 (EF) → WMM AC_VO for low-latency WiFi scheduling */
-            s_wg_output_pcb->tos = 0xB8;
+        s_wg_output_pcb_done = xSemaphoreCreateBinary();
+        if (!s_wg_output_pcb_done) {
+            ESP_LOGE(TAG, "Failed to allocate WG output PCB semaphore");
+            free(netif);
+            return ESP_FAIL;
         }
+        err_t cb_err = tcpip_callback(wg_output_pcb_create_in_tcpip, NULL);
+        if (cb_err != ERR_OK) {
+            ESP_LOGE(TAG, "tcpip_callback failed to queue WG output PCB creation: %d", cb_err);
+            vSemaphoreDelete(s_wg_output_pcb_done);
+            s_wg_output_pcb_done = NULL;
+            free(netif);
+            return ESP_FAIL;
+        }
+        xSemaphoreTake(s_wg_output_pcb_done, portMAX_DELAY);
+        vSemaphoreDelete(s_wg_output_pcb_done);
+        s_wg_output_pcb_done = NULL;
     }
 
     /* Register output callbacks for magicsock mode */
@@ -497,18 +608,20 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
         IP4_ADDR(&wg_peer.allowed_ip.u_addr.ip4, ip_a, ip_b, ip_c, ip_d);
         IP4_ADDR(&wg_peer.allowed_mask.u_addr.ip4, 255, 255, 255, 255);
 
-        /* Set endpoint if available, otherwise leave blank for DERP-only */
-        if (p->endpoint_count > 0 && p->endpoints[0].ip != 0) {
-            uint8_t ea = (p->endpoints[0].ip >> 24) & 0xFF;
-            uint8_t eb = (p->endpoints[0].ip >> 16) & 0xFF;
-            uint8_t ec = (p->endpoints[0].ip >> 8) & 0xFF;
-            uint8_t ed = p->endpoints[0].ip & 0xFF;
-            IP4_ADDR(&wg_peer.endpoint_ip.u_addr.ip4, ea, eb, ec, ed);
-            wg_peer.endport_port = p->endpoints[0].port;
-        } else {
-            ip_addr_set_any(false, &wg_peer.endpoint_ip);
-            wg_peer.endport_port = 0;
-        }
+        /* Leave the endpoint BLANK: data output goes via DERP until DISCO
+         * validates a direct path (Tailscale semantics). Pre-installing
+         * endpoints[0] from the MapResponse advertisement made wireguardif
+         * treat an UNVALIDATED address as a working direct path
+         * (wireguardif.c peer_output: any non-zero endpoint => direct UDP),
+         * so with a CGNAT peer (e.g. PC on cellular) every data reply was
+         * fired at an unreachable advertised endpoint and silently lost,
+         * while inbound arrived via DERP — one-way tunnel, ping/TCP dead.
+         * The validated path install lives in process_disco_pong (only a
+         * DIRECT pong sets best_ip -> wireguardif_update_endpoint), which
+         * still upgrades us to direct within seconds when it truly works
+         * (proven same-LAN). */
+        ip_addr_set_any(false, &wg_peer.endpoint_ip);
+        wg_peer.endport_port = 0;
 
         wg_peer.keep_alive = 25;
 
@@ -672,8 +785,10 @@ static void disco_build_ping(microlink_t *ml, int peer_idx,
 
     /* Encrypt with NaCl box: our disco private key -> peer's disco public key */
     uint8_t ciphertext[46 + NACL_BOX_MACBYTES];
-    nacl_box(ciphertext, plaintext, sizeof(plaintext), nonce,
-             p->disco_key, ml->disco_private_key);
+    uint8_t disco_shared[32];
+    nacl_box_shared_get(disco_shared, p->disco_key, ml->disco_private_key);
+    nacl_box_afternm(ciphertext, plaintext, sizeof(plaintext), nonce,
+                     disco_shared);
 
     /* Build packet: magic(6) + our_disco_pubkey(32) + nonce(24) + ciphertext(62) = 124 bytes */
     size_t pos = 0;
@@ -692,7 +807,7 @@ static void disco_build_ping(microlink_t *ml, int peer_idx,
             pending_probes[i].sent_ms = ml_get_time_ms();
             pending_probes[i].active = true;
             registered = true;
-            ESP_LOGI(TAG, "Probe registered slot=%d peer=%s txid=%02x%02x%02x%02x",
+            ESP_LOGD(TAG, "Probe registered slot=%d peer=%s txid=%02x%02x%02x%02x",
                      i, p->hostname, txid[0], txid[1], txid[2], txid[3]);
             break;
         }
@@ -733,8 +848,10 @@ static void disco_build_pong(microlink_t *ml, int peer_idx,
 
     /* Encrypt */
     uint8_t ciphertext[32 + NACL_BOX_MACBYTES];
-    nacl_box(ciphertext, plaintext, sizeof(plaintext), nonce,
-             p->disco_key, ml->disco_private_key);
+    uint8_t disco_shared[32];
+    nacl_box_shared_get(disco_shared, p->disco_key, ml->disco_private_key);
+    nacl_box_afternm(ciphertext, plaintext, sizeof(plaintext), nonce,
+                     disco_shared);
 
     /* Build packet */
     size_t pos = 0;
@@ -781,7 +898,7 @@ static void disco_send_ping_to_peer(microlink_t *ml, int peer_idx, bool force) {
                         p->endpoints[i].port == p->best_port) continue;
                     int ret = disco_udp_sendto(ml, pkt, pkt_len, p->endpoints[i].ip, p->endpoints[i].port);
                     if (!direct_sent) {  /* Log only first direct send per peer */
-                        ESP_LOGI(TAG, "  direct probe -> %d.%d.%d.%d:%d (%d eps, ret=%d)",
+                        ESP_LOGD(TAG, "  direct probe -> %d.%d.%d.%d:%d (%d eps, ret=%d)",
                                  (int)((p->endpoints[i].ip >> 24) & 0xFF),
                                  (int)((p->endpoints[i].ip >> 16) & 0xFF),
                                  (int)((p->endpoints[i].ip >> 8) & 0xFF),
@@ -805,9 +922,9 @@ static void disco_send_ping_to_peer(microlink_t *ml, int peer_idx, bool force) {
      * DERP pong stealing the probe match from the direct pong. */
     if (!p->has_direct_path || !direct_sent) {
         ml_derp_queue_send(ml, p->public_key, pkt, pkt_len);
-        ESP_LOGI(TAG, "DISCO PING -> %s via DERP", p->hostname);
+        ESP_LOGD(TAG, "DISCO PING -> %s via DERP", p->hostname);
     } else {
-        ESP_LOGI(TAG, "DISCO PING -> %s via direct %d.%d.%d.%d:%d",
+        ESP_LOGD(TAG, "DISCO PING -> %s via direct %d.%d.%d.%d:%d",
                  p->hostname,
                  (int)((p->best_ip >> 24) & 0xFF), (int)((p->best_ip >> 16) & 0xFF),
                  (int)((p->best_ip >> 8) & 0xFF), (int)(p->best_ip & 0xFF),
@@ -834,7 +951,7 @@ static void process_disco_ping(microlink_t *ml, const ml_rx_packet_t *pkt,
 
     ml_peer_t *p = &ml->peers[peer_idx];
 
-    ESP_LOGI(TAG, "DISCO PING from %s (via %s)",
+    ESP_LOGD(TAG, "DISCO PING from %s (via %s)",
              p->hostname, pkt->via_derp ? "DERP" : "direct");
 
     /* Build PONG */
@@ -887,7 +1004,7 @@ static void process_disco_ping(microlink_t *ml, const ml_rx_packet_t *pkt,
     /* 3. ALWAYS send via DERP (guaranteed delivery, even if direct worked) */
     ml_derp_queue_send(ml, p->public_key, pong, pong_len);
 
-    ESP_LOGI(TAG, "PONG sent to %s (direct=%s, DERP=yes)",
+    ESP_LOGD(TAG, "PONG sent to %s (direct=%s, DERP=yes)",
              p->hostname, direct_sent ? "yes" : "no");
 }
 
@@ -914,7 +1031,7 @@ static void process_disco_pong(microlink_t *ml, const ml_rx_packet_t *pkt,
         ml_peer_t *p = &ml->peers[peer_idx];
         uint64_t rtt_ms = now - pending_probes[i].sent_ms;
 
-        ESP_LOGI(TAG, "DISCO PONG from %s: RTT=%llu ms (via %s)",
+        ESP_LOGD(TAG, "DISCO PONG from %s: RTT=%llu ms (via %s)",
                  p->hostname, (unsigned long long)rtt_ms,
                  pkt->via_derp ? "DERP" : "direct");
 
@@ -1006,7 +1123,7 @@ static void process_disco_pong(microlink_t *ml, const ml_rx_packet_t *pkt,
         for (int i = 0; i < MAX_PENDING_PROBES; i++) {
             if (pending_probes[i].active) active_count++;
         }
-        ESP_LOGW(TAG, "DISCO PONG unmatched from %s (via %s) txid=%02x%02x%02x%02x, active_probes=%d",
+        ESP_LOGD(TAG, "DISCO PONG unmatched from %s (via %s) txid=%02x%02x%02x%02x, active_probes=%d",
                  name, pkt->via_derp ? "DERP" : "direct",
                  txid[0], txid[1], txid[2], txid[3], active_count);
     }
@@ -1018,7 +1135,7 @@ static void process_disco_packet(microlink_t *ml, const ml_rx_packet_t *pkt) {
     /* Verify DISCO magic */
     if (memcmp(pkt->data, DISCO_MAGIC, 6) != 0) return;
 
-    ESP_LOGI(TAG, "DISCO RX: %d bytes via %s, disco_key=%02x%02x%02x%02x",
+    ESP_LOGD(TAG, "DISCO RX: %d bytes via %s, disco_key=%02x%02x%02x%02x",
              (int)pkt->len, pkt->via_derp ? "DERP" : "direct",
              pkt->data[6], pkt->data[7], pkt->data[8], pkt->data[9]);
 
@@ -1038,8 +1155,13 @@ static void process_disco_packet(microlink_t *ml, const ml_rx_packet_t *pkt) {
     uint8_t *plaintext = malloc(plaintext_len);
     if (!plaintext) return;
 
-    if (nacl_box_open(plaintext, ciphertext, ciphertext_len, nonce,
-                      sender_disco_key, ml->disco_private_key) != 0) {
+    /* Cached shared key: the X25519 inside nacl_box_open() costs ~30 ms and
+     * would otherwise run on every DISCO packet received. */
+    uint8_t disco_shared[32];
+    nacl_box_shared_get(disco_shared, sender_disco_key, ml->disco_private_key);
+
+    if (nacl_box_open_afternm(plaintext, ciphertext, ciphertext_len, nonce,
+                              disco_shared) != 0) {
         ESP_LOGW(TAG, "DISCO decrypt failed");
         free(plaintext);
         return;
@@ -1072,7 +1194,7 @@ static void process_disco_packet(microlink_t *ml, const ml_rx_packet_t *pkt) {
             size_t ep_data_len = plaintext_len - 2;
             int ep_count = ep_data_len / 18;
 
-            ESP_LOGI(TAG, "CallMeMaybe from %s: %d endpoints (udp_path=%d, at_sock=%d)",
+            ESP_LOGD(TAG, "CallMeMaybe from %s: %d endpoints (udp_path=%d, at_sock=%d)",
                      ml->peers[peer_idx].hostname, ep_count,
                      disco_has_udp_path(ml), ml_at_socket_is_ready());
 
@@ -1095,7 +1217,7 @@ static void process_disco_packet(microlink_t *ml, const ml_rx_packet_t *pkt) {
                 }
                 if (entry[10] != 0xff || entry[11] != 0xff) is_v4_mapped = false;
 
-                ESP_LOGI(TAG, "  CMM ep[%d]: v4mapped=%d port=%d bytes=%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x",
+                ESP_LOGD(TAG, "  CMM ep[%d]: v4mapped=%d port=%d bytes=%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x",
                          i, is_v4_mapped, port,
                          entry[0], entry[1], entry[2], entry[3],
                          entry[4], entry[5], entry[6], entry[7],
@@ -1117,7 +1239,7 @@ static void process_disco_packet(microlink_t *ml, const ml_rx_packet_t *pkt) {
 
                     if (ping_len > 0) {
                         int ret = disco_udp_sendto(ml, ping_pkt, ping_len, ip, port);
-                        ESP_LOGI(TAG, "CMM probe -> %d.%d.%d.%d:%d (%d bytes, ret=%d)",
+                        ESP_LOGD(TAG, "CMM probe -> %d.%d.%d.%d:%d (%d bytes, ret=%d)",
                                  (int)((ip >> 24) & 0xFF), (int)((ip >> 16) & 0xFF),
                                  (int)((ip >> 8) & 0xFF), (int)(ip & 0xFF),
                                  (int)port, (int)ping_len, ret);
@@ -1145,7 +1267,7 @@ static void process_disco_packet(microlink_t *ml, const ml_rx_packet_t *pkt) {
  * ========================================================================== */
 
 static void process_wg_packet(microlink_t *ml, const ml_rx_packet_t *pkt) {
-    ESP_LOGI(TAG, "WG RX: %d bytes, via_derp=%d, type=%d, from=%02x%02x%02x%02x",
+    ESP_LOGD(TAG, "WG RX: %d bytes, via_derp=%d, type=%d, from=%02x%02x%02x%02x",
              (int)pkt->len, pkt->via_derp,
              pkt->len >= 4 ? pkt->data[0] : -1,
              pkt->src_pubkey[0], pkt->src_pubkey[1], pkt->src_pubkey[2], pkt->src_pubkey[3]);
@@ -1271,8 +1393,9 @@ static void disco_send_call_me_maybe(microlink_t *ml, int peer_idx) {
     esp_fill_random(nonce, DISCO_NONCE_LEN);
 
     uint8_t ciphertext[sizeof(plaintext) + NACL_BOX_MACBYTES];
-    nacl_box(ciphertext, plaintext, pt_len, nonce,
-             p->disco_key, ml->disco_private_key);
+    uint8_t disco_shared[32];
+    nacl_box_shared_get(disco_shared, p->disco_key, ml->disco_private_key);
+    nacl_box_afternm(ciphertext, plaintext, pt_len, nonce, disco_shared);
 
     /* Build packet: magic(6) + disco_pubkey(32) + nonce(24) + ciphertext */
     uint8_t pkt[256];
@@ -1605,10 +1728,18 @@ void ml_wg_mgr_task(void *arg) {
             free(disco_pkt.data);
         }
 
-        /* Process WireGuard packets */
+        /* Process WireGuard packets.
+         * The first receive blocks briefly so the task wakes as soon as a
+         * packet lands rather than on the next fixed tick. Polling added up to
+         * 10 ms of latency to every packet and let the queue overflow between
+         * wakeups. When the queue is empty this blocks for the same 10 ms the
+         * trailing vTaskDelay used to, so the idle cost is unchanged. */
         ml_rx_packet_t wg_pkt;
-        while (xQueueReceive(ml->wg_rx_queue, &wg_pkt, 0) == pdTRUE) {
+        if (xQueueReceive(ml->wg_rx_queue, &wg_pkt, pdMS_TO_TICKS(10)) == pdTRUE) {
             process_wg_packet(ml, &wg_pkt);
+            while (xQueueReceive(ml->wg_rx_queue, &wg_pkt, 0) == pdTRUE) {
+                process_wg_packet(ml, &wg_pkt);
+            }
         }
 
         /* Run WireGuard periodic processing (handshakes, keepalives, rekeys).
@@ -1621,7 +1752,7 @@ void ml_wg_mgr_task(void *arg) {
             wireguardif_periodic((struct netif *)ml->wg_netif);
             uint64_t dt = ml_get_time_ms() - t0;
             last_wg_periodic_ms = now;
-            ESP_LOGI(TAG, "wireguardif_periodic: %llu ms", (unsigned long long)dt);
+            ESP_LOGD(TAG, "wireguardif_periodic: %llu ms", (unsigned long long)dt);
         }
 
         /* Periodic DISCO probes (every 1s check) */
@@ -1631,12 +1762,11 @@ void ml_wg_mgr_task(void *arg) {
             disco_periodic_probes(ml);
             uint64_t dt = ml_get_time_ms() - t0;
             last_disco_probe_ms = now;
-            ESP_LOGI(TAG, "disco_periodic_probes: %llu ms", (unsigned long long)dt);
+            ESP_LOGD(TAG, "disco_periodic_probes: %llu ms", (unsigned long long)dt);
         }
 
-        /* Yield - 10ms loop rate for minimum packet processing latency.
-         * Each wake is cheap: queue check + event bits check, no crypto. */
-        vTaskDelay(pdMS_TO_TICKS(10));
+        /* No trailing delay: the blocking receive above paces the loop and
+         * yields whenever there is nothing to do. */
     }
 
     /* Shutdown WireGuard interface */
