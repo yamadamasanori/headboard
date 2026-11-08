@@ -4,8 +4,8 @@
 
 配布物ごとの内訳:
 
-- **ソース（このリポジトリ）**: 1・2・4・5 を同梱しています
-- **ファームウェア（`web/firmware/headboard-led-ota.bin`、`headboard-led-boot.bin`）**: 1・3・4 が組み込まれています。本体の設定ページとして 5 も組み込まれています
+- **ソース（このリポジトリ）**: 1・2・4・5・6 を同梱しています
+- **ファームウェア（`web/firmware/headboard-led-ota.bin`、`headboard-led-boot.bin`、XIAO 用の `web/xiao/firmware/headboard-led-xiao-*.bin`）**: 1・3・4 が組み込まれています。本体の設定ページとして 5 も組み込まれています。XIAO 用には 6 も組み込まれています
 - **設定ページ（`web/`）**: 2・5 を使っています
 
 ---
@@ -132,6 +132,14 @@ Copyright (c) 2009 Kazuhiko Arase
 ```
 
 「QR コード」は株式会社デンソーウェーブの登録商標です。
+
+---
+
+## 6. X11 misc-fixed フォント（`main/oled_font.c`）
+
+- 配布元: https://gitlab.freedesktop.org/xorg/font/misc-misc （`5x8.bdf`、`8x13B.bdf`）
+- ライセンス: パブリックドメイン（"Public domain font.  Share and enjoy."）
+- XIAO ESP32S3 の OLED 表示に使っています。`tools/gen_font.py` で ASCII の文字だけを C の配列に変換しています
 
 ---
 

@@ -7,7 +7,7 @@
 - 量産向けに、USB では設定を変えられない。Wi-Fi はスマホから Bluetooth で、MQTT・Tailscale・GPIO などは Wi-Fi に繋がった本体の設定ページ（`http://headboard-xxxxxx.local/`）で設定する
 - 本体の設定ページでは、動作ログ・前回の再起動の理由と直前のエラーも見られ、ファームウェアの更新（OTA）もできる。更新に失敗したら前の版に自動で戻る
 - 最初のファームウェアの書き込みは、USB で繋いだパソコンのブラウザから行う（ESP Web Tools を同梱）
-- 基板上のフルカラー LED で、Wi-Fi・Tailscale・MQTT の接続状態を色で表示
+- 基板上のフルカラー LED で、Wi-Fi・Tailscale・MQTT の接続状態を色で表示。OLED ディスプレイ（SSD1306、128×64）をつなげば、文字でも表示（Seeed Studio XIAO ESP32S3 版は OLED で表示）
 - Home Assistant から本体の状態（電波の強さ・再起動の理由・エラー・メモリ・温度など）と、ライトの点灯時間・消費電力・電力量を見られる。再起動やファームウェアの更新も Home Assistant から行える
 - ESP32 自身が Tailscale で tailnet に参加し、離れた場所の Home Assistant の MQTT ブローカーにも VPN 経由で接続できる（[MicroLink](https://github.com/CamM2325/microlink) を組み込み）
 
@@ -16,22 +16,28 @@
 | パス | 内容 |
 |---|---|
 | `main/` | ファームウェアのソース（ESP-IDF / C） |
-| `main/Kconfig.projbuild` | ビルド時の設定（開発用に USB から設定できるようにするか、Home Assistant からの更新に使う配布元の URL） |
+| `main/Kconfig.projbuild` | ビルド時の設定（ボード、開発用に USB から設定できるようにするか、Home Assistant からの更新に使う配布元の URL） |
+| `main/board.h` | ボードごとの違い（GPIO の既定値、配布するファイル名など） |
+| `main/status_led.c`、`main/status_oled.c` | 状態表示（N16R8 のフルカラー LED、OLED）。表示する状態の判定は `main/status.c` で共通 |
+| `main/oled_font.c` | OLED 用のフォント（X11 misc-fixed、パブリックドメイン。`tools/gen_font.py` で作る） |
 | `components/mdns/` | mDNS（Espressif、Apache-2.0、mdns-v1.8.2 を同梱。`headboard-xxxxxx.local` の名前で本体を開くため） |
-| `partitions.csv` | フラッシュの区画（ファームウェア 4MB × 2 の OTA 構成と、クラッシュの記録 256KB） |
+| `partitions.csv` | フラッシュの区画（N16R8 用。ファームウェア 4MB × 2 の OTA 構成と、クラッシュの記録 256KB） |
+| `partitions_8mb.csv` | フラッシュ 8MB 用の区画（XIAO 用。ファームウェア 3.75MB × 2 と、クラッシュの記録 256KB） |
 | `components/microlink/` | Tailscale クライアント MicroLink（MIT、コミット 216da33 を同梱。認証失敗の検出、定期ログを減らす、tailnet 経由の TCP でクラッシュする不具合の修正と、本家で未マージの修正（スレッドの安全性、DERP の接続失敗時のメモリの解放、大きな転送での取りこぼしなど）を取り込んだ変更あり、`VERSION` 参照） |
-| `sdkconfig.defaults*` | ビルド設定（共通 / ESP32-S3 用） |
+| `sdkconfig.defaults*` | ビルド設定（共通 / ESP32-S3 用 / ボードごと（`.n16r8`、`.xiao`）） |
 | `keys/headboard-signing-pubkey.pem` | ファームウェアの署名を確かめる公開鍵（秘密鍵はリポジトリに入れない。「ファームウェアの署名」参照） |
 | `web/index.html` | 書き込み・設定ページ。本体にも組み込まれ、本体の設定ページとしても使われる |
 | `web/firmware/headboard-led-ota.bin` | ビルド済みファームウェア（ESP32-S3 用のアプリ。USB での書き込みと、本体の設定ページからの更新の両方に使う） |
 | `web/firmware/headboard-led-boot.bin`, `headboard-led-otadata.bin` | USB で書き込むときに一緒に書き込むブートローダーとパーティション表、起動するアプリの選択（設定の保存領域には書き込まない） |
 | `web/manifest.json` | ESP Web Tools 用の定義 |
+| `web/xiao/` | XIAO ESP32S3 用の `manifest.json` と `firmware/headboard-led-xiao-*.bin`（ファイルの役割は N16R8 用と同じ） |
 | `web/vendor/esp-web-tools/` | ESP Web Tools 10.4.0（Apache-2.0）。CDN に頼らずオフラインでも動くよう同梱 |
 | `web/vendor/qrcode-generator/` | QR Code Generator 2.0.4（MIT）。本体ラベルの QR コード用 |
 | `tools/serve.py` | 設定ページをローカルで開くための簡易サーバー |
 | `.devcontainer/` | VS Code の devcontainer 設定（ESP-IDF v5.3.1 のイメージを使用） |
 | `tools/build.sh` | ESP-IDF 環境でビルド・署名して `web/` を更新（docker は使わない。署名用の秘密鍵が必要） |
-| `tools/package_web.py` | ビルド結果を `web/firmware/` にまとめ、ライセンス表示を `web/` にコピーする |
+| `tools/package_web.py` | ビルド結果を `web/firmware/`（XIAO 用は `web/xiao/firmware/`）にまとめ、ライセンス表示を `web/` にコピーする |
+| `tools/gen_font.py` | OLED 用のフォントを BDF から C の配列にする |
 | `.github/workflows/pages.yml` | GitHub に置いた場合に、`web/` を GitHub Pages に公開する設定（ビルドはせず、ファームウェアの署名を確かめてから公開） |
 | `platformio.ini` | PlatformIO でビルドする場合の設定 |
 | `LICENSE` | このプロジェクトのライセンス（MIT） |
@@ -40,13 +46,21 @@
 
 ## 基板と配線（既定値）
 
-ESP32-S3-DevKitC-1 互換の ESP32-S3 N16R8 基板（フラッシュ 16MB、オクタル PSRAM 8MB）を想定しています。
+次の 2 種類のボードに対応しています。ファームウェアはボードごとに別です（書き込みページでボードを選びます）。
+
+- ESP32-S3-DevKitC-1 互換の ESP32-S3 N16R8 基板（フラッシュ 16MB、オクタル PSRAM 8MB）。状態表示は基板上のフルカラー LED
+- Seeed Studio XIAO ESP32S3（フラッシュ 8MB、オクタル PSRAM 8MB）。状態表示は、つないだ OLED ディスプレイ（SSD1306、128×64、I2C）。フラッシュ 16MB の XIAO ESP32S3 Plus でも、XIAO 用のファームウェアが動きます（8MB だけを使います）
+
+### ESP32-S3 N16R8
 
 | 用途 | 既定の GPIO |
 |---|---|
 | 読書灯 | GPIO4 |
 | バックライト | GPIO5 |
 | 状態表示 LED（基板上の WS2812） | GPIO48 |
+| OLED の SDA・SCL（任意） | 使わない（つなぐときの例: GPIO8・GPIO9） |
+
+OLED ディスプレイ（SSD1306）もつなげます。3.3V・GND・SCL・SDA の 4 本でつなぎ、設定ページの「状態表示」で SDA と SCL の GPIO を入れて保存します。フルカラー LED と OLED の両方に表示します（表示の内容は「[状態表示（OLED）](#状態表示oled)」）。起動時の動作に関わる GPIO0・3・45・46 と、使用中の GPIO48・4・5 は避けてください。
 
 GPIO は設定ページから変更できます。フラッシュと PSRAM が使う GPIO26〜37、USB 端子の GPIO19・20、COM 端子の GPIO43・44 は選べません。
 ESP32 のピンで LED を直接駆動することはできないので、ロジックレベル N チャネル MOSFET などのドライバを挟んでください。ドライバがアクティブ Low の回路なら、設定ページの「出力を反転する」をオンにします。PWM 周波数の既定は 5 kHz（13 bit 分解能）です。
@@ -63,7 +77,22 @@ ESP32 のピンで LED を直接駆動することはできないので、ロジ
 | 3 秒以上 | Wi-Fi の設定だけを消して再起動し、Bluetooth での設定を待つ（MQTT などの設定は残る）。「Tailscale からだけ受け付ける」もオフに戻す | 白・点灯 |
 | 10 秒以上 | すべての設定と累計（点灯時間・起動回数など）を消して再起動（工場出荷時の状態） | 赤・点灯 |
 
-LED の色が変わったところで離すと、その動作をします。
+LED の色が変わったところで離すと、その動作をします。短く押すと、消えている状態表示を 10 秒間出し直します。
+
+### Seeed Studio XIAO ESP32S3
+
+| 用途 | 既定の GPIO（XIAO のピン） |
+|---|---|
+| 読書灯 | GPIO1（D0） |
+| バックライト | GPIO2（D1） |
+| OLED の SDA | GPIO5（D4） |
+| OLED の SCL | GPIO6（D5） |
+
+- OLED は 3.3V・GND・SCL・SDA の 4 本でつなぎます（I2C のアドレスは 0x3C か 0x3D を自動で探します）。OLED の GPIO は、設定ページで変えられます（両方 -1 で使わない）
+- XIAO の USB-C 端子は ESP32-S3 内蔵の USB です。書き込み・状態表示・ラベル表示ができます。ログは D6（GPIO43、TX）に出るので、見るときは USB シリアル変換器をつないでください（設定ページのログ欄は、本体の設定ページなら Wi-Fi 経由で見られます）
+- D6・D7（GPIO43・44）は、ログ用なので選べません。D2（GPIO3）は起動時の動作を決めるピンなので、ライトには使わないでください
+- BOOT ボタン（B）の働きは N16R8 と同じです。押している間は、画面に離したときの動作と、押している秒数が出ます
+- 基板上のオレンジの LED（GPIO21）は使いません
 
 ## 状態表示 LED
 
@@ -82,6 +111,38 @@ LED の色が変わったところで離すと、その動作をします。
 - 明るさ（既定 32/255）、GPIO（-1 で使わない）、正常時も点灯し続けるかは、設定ページの「状態表示 LED」で変えられます。いま表示している状態は「動作確認」欄にも出ます
 - 互換基板には、LED の横に「RGB」と書かれたはんだジャンパがあり、そこをはんだで繋がないと点灯しない製品があります。点灯しないときは確認してください
 
+## 状態表示（OLED）
+
+XIAO ESP32S3 では標準の表示です。N16R8 では、つないで設定したときだけ表示します（フルカラー LED と両方に表示）。
+
+上段（16 ドット）にホスト名と接続状態のアイコン、下段に 1 行 16 文字 × 3 行で状態を英語で表示します。上段の高さを 16 ドットにしているので、上が黄色・下が青の 2 色のモジュールでも、区切りが合います。
+
+```
+headboard-a1b2c3  ▂▄▆ [TS][MQ]     ← Wi-Fi の電波の強さ、Tailscale、MQTT
+Reading   ON  80%
+Backlight OFF
+192.168.1.23                        ← Tailscale を使っていれば、tailnet の IP と 3 秒ごとに交互
+```
+
+| 状態 | 表示 |
+|---|---|
+| 起動直後（1 秒） | `Headboard LED`、版、`XIAO ESP32S3` |
+| Bluetooth での設定待ち | `Wi-Fi not set` / `Setup via BLE:` / 本体の名前（`PROV_HB_xxxxxx`）。設定用コードは表示しません |
+| Wi-Fi 接続中・切断 | `Wi-Fi` / `Connecting...` / SSID |
+| Tailscale の認証失敗 | `Tailscale` / `Auth failed (!)` / `Check auth key` |
+| Tailscale 接続中 | `Tailscale` / `Connecting...` |
+| MQTT の接続拒否 | `MQTT` / `Refused (!)` / `Check user/pass` |
+| ブローカー未設定 | `MQTT` / `Not configured` / `Open web setup` |
+| MQTT 接続中・切断 | `MQTT` / `Connecting...` / ブローカーのホスト名 |
+| すべて正常 | ライトの状態と IP アドレス → 10 秒後に画面を消す |
+| BOOT ボタンを押している | `3s: Reset Wi-Fi` / `10s: Reset all` と進み具合 → 3 秒で `Release to: Reset Wi-Fi` → 10 秒で画面全体を反転して `Release to: RESET ALL` |
+| 本体を光らせる（Home Assistant） | 画面全体を速く点滅し、`HERE` を大きく表示（10 秒） |
+
+- 上段のアイコンは、繋がっていれば塗りつぶし、接続中は枠だけ、エラーは斜線入りです。Tailscale を使わないときは TS を出しません。下段に tailnet の IP を出している間は、TS の下に線が出ます
+- 画面が消えているときも、Home Assistant からライトを操作すると 5 秒（操作したライトの行を 1 秒反転）、BOOT ボタンを短く押すと 10 秒表示します。問題があるときは、消さずに表示し続けます
+- 明るさ（既定 32/255）と、正常なときも表示し続けるか、表示を 180° 回すかは、設定ページの「状態表示」で変えられます。明るさは Home Assistant からも変えられ、すぐに反映されます。明るさが 32 未満のときは、OLED の駆動の設定（プリチャージ期間と VCOMH の電圧）を段階的に下げて、さらに暗くします
+- 焼き付きを防ぐため、表示を 1 分ごとに 0〜2 ドット横にずらします
+
 ## 使い方
 
 量産時の流れは次のとおりです。USB を使うのは 1 の書き込みとラベルの印刷だけで、設定はすべて無線で行います。
@@ -97,7 +158,8 @@ Web Serial は HTTPS か localhost でしか動かないため、HTML ファイ�
 - devcontainer の中で `python tools/serve.py` を実行し（8000 番は自動で転送されます）、ホストの Chrome か Edge で http://localhost:8000 を開く
 - GitHub のリポジトリに置き、GitHub Pages を有効にする（`.github/workflows/pages.yml` が `web/` を自動で公開します）
 
-基板を USB で繋ぎ、「ESP32 に書き込む」を押してシリアルポートを選びます。初回は「消去」を選んでください。
+基板を USB で繋ぎ、ボード（ESP32-S3 N16R8 か Seeed Studio XIAO ESP32S3）を選んでから「ESP32 に書き込む」を押してシリアルポートを選びます。初回は「消去」を選んでください。
+ボードを間違えて N16R8 用を XIAO に書き込むと、「ESP32 に接続」したときに警告が出ます（フラッシュの大きさで判断します）。
 COM 端子でポートが表示されないときは、USB シリアル変換チップ（CH340 / CH343 / CP210x）のドライバを入れてください。書き込みが始まらないときは、BOOT ボタンを押したまま RST ボタンを押して離し、書き込みモードにしてから試してください。
 
 2.4.0 からは、USB で書き込んでも設定は消えません（「消去」を選んだときだけ消えます）。2.3.0 までは、USB で書き込むと「消去」を選ばなくても設定が消えていました。
@@ -142,10 +204,10 @@ MQTT ブローカー（Home Assistant の Mosquitto アドオンなど）のア�
 
 #### ファームウェアの更新（OTA）
 
-本体の設定ページの「ファームウェアの更新」で `web/firmware/headboard-led-ota.bin` を選んで「更新する」を押します。書き込みが終わると再起動します。
+本体の設定ページの「ファームウェアの更新」で `web/firmware/headboard-led-ota.bin`（XIAO は `web/xiao/firmware/headboard-led-xiao-ota.bin`）を選んで「更新する」を押します。書き込みが終わると再起動します。
 
 - 新しいファームウェアが起動して Wi-Fi に繋がるまで（Wi-Fi 未設定なら起動するまで）に失敗すると、次の起動で前の版に自動で戻ります
-- `headboard-led-boot.bin` などの USB 用のファイルや ESP32-S3 用でないファイルは、書き込む前に断ります
+- `headboard-led-boot.bin` などの USB 用のファイルや ESP32-S3 用でないファイル、別のボード用のファイルは、書き込む前に断ります（ボードごとにプロジェクト名を変えて見分けています。2.5.0 以前の N16R8 も、XIAO 用は断ります）
 - 2.3.0 からは、正しい鍵で署名したファームウェアだけを書き込みます（Home Assistant からの更新も同じ）。署名がないものや違う鍵のものは、書き込みの最後で断り、今の版のまま動き続けます。2.2.0 以前から 2.3.0 への更新は、まだ署名を確かめない版からなので、そのまま入ります
 
 Home Assistant の「設定 → 更新」からも更新できます（下の「6. Home Assistant で確認する」）。
@@ -212,7 +274,7 @@ Home Assistant に MQTT 統合が設定されていれば、「設定 → デバ
 | ライトの累計 | 読書灯・バックライトそれぞれの点灯時間、点灯回数、消費電力（推定）、電力量（推定） |
 | 診断 | Wi-Fi の電波の強さ・SSID・アクセスポイント・チャンネル、IP アドレス、稼働時間、前回の再起動の理由、前回の再起動が異常か（電圧低下・クラッシュ・ウォッチドッグ）、直前のエラー、前回の起動の最後のエラー、空きメモリ（今と最小値）、内蔵 RAM の空き（今と最小値。TLS は内蔵 RAM を使う）、PSRAM の空き、チップの温度、状態表示 LED の表示、起動した回数、電圧低下による再起動の回数、クラッシュによる再起動の回数、Wi-Fi が切れた回数、MQTT の再接続の回数 |
 | 診断（Tailscale を使うときだけ） | Tailscale の状態・IP アドレス・ピアの数・認証エラー |
-| 操作 | 再起動、本体を光らせる（状態表示 LED が白で 10 秒速く点滅）、更新を確認（配布元の新しい版をすぐに確かめる。配布元を設定したときだけ）、累計をクリア（設定は残る。誤操作を避けるため最初は無効で、使うときはデバイスのページで有効にする）、状態表示 LED の明るさ、状態表示 LED を常に点灯、詳細ログ |
+| 操作 | 再起動、本体を光らせる（状態表示 LED が白で 10 秒速く点滅。XIAO は画面が点滅）、更新を確認（配布元の新しい版をすぐに確かめる。配布元を設定したときだけ）、累計をクリア（設定は残る。誤操作を避けるため最初は無効で、使うときはデバイスのページで有効にする）、状態表示 LED の明るさ、状態表示 LED を常に点灯、詳細ログ（XIAO では「画面の明るさ」「画面を常に表示」） |
 | 更新 | ファームウェア（新しい版があると「設定 → 更新」に出て、そこから書き込める） |
 
 - 値は 60 秒ごと（と、操作したとき・MQTT に繋がったとき）に送ります
@@ -220,7 +282,7 @@ Home Assistant に MQTT 統合が設定されていれば、「設定 → デバ
 - 点灯時間・点灯回数・電力量・起動回数などの累計は、本体に 10 分ごと（と意図した再起動の前）に保存し、再起動しても続きから数えます。電源を急に切ると、最後の保存から後の分（最大 10 分）は残りません
 - 累計は工場出荷時に戻すか、設定ページか Home Assistant の「累計をクリア」で 0 に戻ります（「累計をクリア」では設定は残ります）。量産時の検査で増えた分は、出荷前に消してください
 - Wi-Fi が切れた回数と MQTT の再接続の回数は、起動してからの回数です（Home Assistant の履歴で長期の傾向を見られます）
-- 新しい版は、本体が MQTT につないだときと 6 時間ごと（と HA の「更新を確認」ボタンを押したとき）に配布元（既定は `https://yamadamasanori.github.io/headboard/`、`idf.py menuconfig` の「ヘッドボードLED → ファームウェアの配布元」で変更、空にすると使わない）の `manifest.json` を見て探します。HTTPS でサーバーの証明書を確かめてから取得します。GitHub に push してから Pages に公開され、キャッシュが切れるまで 10 分ほどかかります
+- 新しい版は、本体が MQTT につないだときと 6 時間ごと（と HA の「更新を確認」ボタンを押したとき）に配布元（既定は `https://yamadamasanori.github.io/headboard/`、XIAO は `https://yamadamasanori.github.io/headboard/xiao/`。`idf.py menuconfig` の「ヘッドボードLED → ファームウェアの配布元」で変更、空にすると使わない）の `manifest.json` を見て探します。HTTPS でサーバーの証明書を確かめてから取得します。GitHub に push してから Pages に公開され、キャッシュが切れるまで 10 分ほどかかります
 - 設定用コード・パスワード・Tailscale の認証キーは MQTT に送りません
 
 ## MQTT の仕様
@@ -270,7 +332,14 @@ VS Code で「Reopen in Container」を選び、コンテナの中で次を実�
 sh tools/build.sh
 ```
 
-`web/firmware/`（アプリの `headboard-led-ota.bin` と、USB 用の `headboard-led-boot.bin`・`headboard-led-otadata.bin`）と `web/manifest.json` も更新されます。署名用の秘密鍵（`secrets/headboard-signing-key.pem`）がないとビルドできません。`build.sh` は `idf.py set-target` で `sdkconfig` を作り直すので、`menuconfig` で開発用の設定をオンにしたときは、`build.sh` ではなく `idf.py build` のあとに `python tools/package_web.py` を実行してください。
+N16R8 用と XIAO 用の両方をビルドし、`web/firmware/`（アプリの `headboard-led-ota.bin` と、USB 用の `headboard-led-boot.bin`・`headboard-led-otadata.bin`）と `web/manifest.json`、`web/xiao/`（同じく `headboard-led-xiao-*.bin` と `manifest.json`）も更新されます。署名用の秘密鍵（`secrets/headboard-signing-key.pem`）がないとビルドできません。`build.sh` は `idf.py set-target` で `sdkconfig`（XIAO は `sdkconfig.xiao`）を作り直すので、`menuconfig` で開発用の設定をオンにしたときは、`build.sh` ではなく次のように実行してください。
+
+```sh
+idf.py build && python tools/package_web.py                                    # N16R8
+idf.py -B build-xiao -DHB_BOARD=xiao build && python tools/package_web.py build-xiao   # XIAO
+```
+
+ボードは `-DHB_BOARD`（既定は `n16r8`）で選びます。ボードごとに `sdkconfig` とビルドのディレクトリを分けてください（XIAO は `sdkconfig.xiao` と `build-xiao`）。混ざるとビルドが止まります。
 
 PlatformIO（`platformio.ini`）の設定は残していますが、動作確認をしていない補助的な経路です。
 
@@ -295,6 +364,7 @@ espsecure.py extract_public_key --version 2 --keyfile secrets/headboard-signing-
 
 ## 動作確認したこと
 
+- 2.6.0（XIAO ESP32S3 対応、N16R8 への OLED の追加）は、ESP-IDF v5.3.1 で N16R8 用・XIAO 用の両方のビルドが通ること、XIAO 用のパーティション表とフラッシュの大きさ（8MB）、署名を確認しました。OLED の各画面は、描画の処理をパソコン上で動かして画像にして確認しました。N16R8 に OLED（GME-12864-52、SSD1306）をつないだ実機で、OTA での更新、I2C での表示、明るさの効き方（1〜31 の段階的な減光を含む）、180° 回転、BOOT ボタンの案内と短く押したときの再表示、正常になってから 10 秒で画面を消すこと、Home Assistant からライトを操作したときの 5 秒の表示を確認しました。XIAO の実機ではまだ確かめていません（Wi-Fi・Bluetooth、8MB のパーティションでの起動と OTA）
 - ESP-IDF v5.3.1 で、ESP32-S3 向けのビルドが通ることを確認しました
 - ESP32-S3 のエミュレータ（QEMU、Wi-Fi の代わりに仮想の有線 LAN）上で起動し、本体の設定ページを Chromium で開いて、次を確認しました
   - 設定用コードでのログイン（誤ったコードの拒否）、設定の読み込みと保存、再起動後の自動再接続
@@ -322,7 +392,7 @@ espsecure.py extract_public_key --version 2 --keyfile secrets/headboard-signing-
 
 ESP32 で動く Tailscale クライアントは、コミュニティ製の [MicroLink](https://github.com/CamM2325/microlink)（MIT ライセンス、ESP-IDF 専用）だけなので、それを `components/microlink/` に同梱しています。
 
-- ESP32-S3 N16R8 では PSRAM を使い、MicroLink の標準値（受信バッファ 512KB、ピア 16 台）で動かします
+- PSRAM（N16R8・XIAO ともに 8MB）を使い、MicroLink の標準値（受信バッファ 512KB、ピア 16 台）で動かします
 - 認証キーが拒否されたことを状態表示 LED で知らせるため、また数秒ごとの定期ログを減らすため、MicroLink に小さな変更を加えています（`components/microlink/VERSION` に記載）
 - 本家にまだ取り込まれていない修正の PR のうち、この本体で役立つものを取り込んでいます（同じく `VERSION` に記載）
 - 中継（DERP）の既定の地域は東京（7）にしています。ほかの地域で使うときは `sdkconfig.defaults` の `CONFIG_ML_DERP_REGION` を変えてください

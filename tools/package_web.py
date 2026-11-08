@@ -5,12 +5,18 @@
   web/firmware/headboard-led-otadata.bin USB で書き込む用：起動するアプリの選択を初期化する（ota_0 から起動）
   web/firmware/headboard-led-ota.bin     アプリ。USB では ota_0 に書き込み、本体の設定ページからの Wi-Fi 更新にも使う
 
+ボードごとに置き場所を分ける（本体は自分のボードの manifest.json だけを見て更新を探す）
+  N16R8 : web/manifest.json、web/firmware/headboard-led-*.bin
+  XIAO  : web/xiao/manifest.json、web/xiao/firmware/headboard-led-xiao-*.bin
+
 USB で書き込むときは、設定の保存領域（nvs）には書き込まない（1 つのイメージにまとめると、
 間の nvs も空のデータで上書きされて、設定が消えてしまうため）
 
 使い方（ESP-IDF の環境で、プロジェクトのルートから）:
     idf.py build
     python tools/package_web.py
+    idf.py -B build-xiao -DHB_BOARD=xiao build
+    python tools/package_web.py build-xiao
 """
 import json
 import pathlib
@@ -19,12 +25,19 @@ import subprocess
 import sys
 
 root = pathlib.Path(__file__).resolve().parent.parent
-build = root / "build"
+build = root / (sys.argv[1] if len(sys.argv) > 1 else "build")
 web = root / "web"
-fw = web / "firmware"
-out_boot = fw / "headboard-led-boot.bin"
-out_otadata = fw / "headboard-led-otadata.bin"
-out_ota = fw / "headboard-led-ota.bin"
+
+# ボードは sdkconfig で決まる。置き場所とファイル名の先頭は main/board.h の BOARD_FW_PREFIX と合わせる
+sdkconfig = json.loads((build / "config" / "sdkconfig.json").read_text())
+if sdkconfig.get("HEADBOARD_BOARD_XIAO"):
+    board, out_dir, prefix = "XIAO ESP32S3", web / "xiao", "headboard-led-xiao"
+else:
+    board, out_dir, prefix = "ESP32-S3 N16R8", web, "headboard-led"
+fw = out_dir / "firmware"
+out_boot = fw / f"{prefix}-boot.bin"
+out_otadata = fw / f"{prefix}-otadata.bin"
+out_ota = fw / f"{prefix}-ota.bin"
 
 target = json.loads((build / "project_description.json").read_text())["target"]  # esp32s3 など
 chip_family = {"esp32s3": "ESP32-S3"}[target]
@@ -44,10 +57,11 @@ subprocess.run(
 )
 out_otadata.write_bytes((build / flasher["otadata"]["file"]).read_bytes())
 out_ota.write_bytes((build / flasher["app"]["file"]).read_bytes())
-(fw / "headboard-led.bin").unlink(missing_ok=True)  # 2.3.0 までの一体型イメージ
+if out_dir == web:
+    (fw / "headboard-led.bin").unlink(missing_ok=True)  # 2.3.0 までの一体型イメージ
 
 manifest = {
-    "name": "ヘッドボードLED",
+    "name": f"ヘッドボードLED（{board}）",
     "version": version,
     "new_install_prompt_erase": True,
     "builds": [{"chipFamily": chip_family, "parts": [
@@ -56,9 +70,10 @@ manifest = {
         {"path": "firmware/" + out_ota.name, "offset": offset("app")},
     ]}],
 }
-(web / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+(out_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 # ファームウェアと一緒にライセンス表示も配布する（設定ページからリンク）
 for name, dst in (("LICENSE", "LICENSE.txt"), ("THIRD_PARTY_NOTICES.md", "THIRD_PARTY_NOTICES.txt")):
     (web / dst).write_bytes((root / name).read_bytes())
-print(f"wrote {out_boot.relative_to(root)}, {out_otadata.relative_to(root)}, {out_ota.relative_to(root)} and web/manifest.json (version {version}, {chip_family})")
+print(f"wrote {out_boot.relative_to(root)}, {out_otadata.relative_to(root)}, {out_ota.relative_to(root)} and "
+      f"{(out_dir / 'manifest.json').relative_to(root)} (version {version}, {chip_family}, {board})")

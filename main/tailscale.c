@@ -77,6 +77,15 @@ uint32_t ts_vpn_ip(void)
     return ts_is_connected() ? microlink_get_vpn_ip(s_ml) : 0;
 }
 
+void ts_vpn_ip_str(char out[16])
+{
+    out[0] = 0;
+    uint32_t ip = ts_vpn_ip();
+    if (ip) {
+        microlink_ip_to_str(ip, out);
+    }
+}
+
 bool ts_has_error(void)
 {
     return s_ml && (microlink_auth_failed(s_ml) || microlink_get_state(s_ml) == ML_STATE_ERROR);

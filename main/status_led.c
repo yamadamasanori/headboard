@@ -1,4 +1,4 @@
-#include "status_led.h"
+#include "status.h"
 
 #include <stdbool.h>
 #include <string.h>
@@ -9,8 +9,6 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "net.h"
-#include "tailscale.h"
 
 static const char *TAG = "status_led";
 
@@ -42,11 +40,6 @@ static const rgb_t C_BLACK = {0, 0, 0};
 
 static rmt_channel_handle_t s_chan;
 static rmt_encoder_handle_t s_enc;
-static volatile int64_t s_pulse_until_us;
-static volatile int64_t s_identify_until_us;
-static volatile status_hint_t s_hint;
-static const char *volatile s_indicator = "starting";
-
 static volatile bool s_busy;
 
 static bool IRAM_ATTR on_tx_done(rmt_channel_handle_t ch, const rmt_tx_done_event_data_t *ev, void *ctx)
@@ -90,35 +83,29 @@ static bool blink_on(pattern_t p, int64_t now_ms)
 // 今の状態から、表示する色と光り方を決める。正常なら true
 static bool decide(rgb_t *color, pattern_t *pat)
 {
-    net_state_t st;
-    net_get_state(&st);
-
-    if (s_hint == STATUS_HINT_WIFI_RESET) {
-        *color = C_WHITE, *pat = PAT_SOLID, s_indicator = "button_wifi_reset";
-    } else if (s_hint == STATUS_HINT_FACTORY_RESET) {
-        *color = C_RED, *pat = PAT_SOLID, s_indicator = "button_factory_reset";
-    } else if (!st.wifi_configured) {
-        *color = C_PURPLE, *pat = PAT_BLINK_SLOW, s_indicator = st.ble_setup ? "ble_setup" : "wifi_unconfigured";
-    } else if (!st.wifi_up) {
-        *color = C_BLUE, *pat = PAT_BLINK_FAST, s_indicator = "wifi_connecting";
-    } else if (g_cfg.ts_enabled && ts_has_error()) {
-        *color = C_RED, *pat = PAT_BLINK, s_indicator = "tailscale_auth_error";
-    } else if (g_cfg.ts_enabled && !ts_is_connected()) {
-        *color = C_CYAN, *pat = PAT_BLINK, s_indicator = "tailscale_connecting";
-    } else if (st.mqtt_refused) {
-        *color = C_RED, *pat = PAT_BLINK, s_indicator = "mqtt_refused";
-    } else if (!st.mqtt_configured || !st.mqtt_up) {
-        *color = C_YELLOW, *pat = PAT_BLINK, s_indicator = "mqtt_connecting";
-    } else {
-        *color = C_GREEN, *pat = PAT_SOLID, s_indicator = "ok";
-        return true;
+    status_t st = status_decide();
+    switch (status_hint()) {
+    case STATUS_HINT_WIFI_RESET: *color = C_WHITE, *pat = PAT_SOLID; return false;
+    case STATUS_HINT_FACTORY_RESET: *color = C_RED, *pat = PAT_SOLID; return false;
+    default: break;
+    }
+    switch (st) {
+    case ST_WIFI_UNCONFIGURED:
+    case ST_BLE_SETUP: *color = C_PURPLE, *pat = PAT_BLINK_SLOW; break;
+    case ST_WIFI_CONNECTING: *color = C_BLUE, *pat = PAT_BLINK_FAST; break;
+    case ST_TS_AUTH_ERROR:
+    case ST_MQTT_REFUSED: *color = C_RED, *pat = PAT_BLINK; break;
+    case ST_TS_CONNECTING: *color = C_CYAN, *pat = PAT_BLINK; break;
+    case ST_MQTT_UNCONFIGURED:
+    case ST_MQTT_CONNECTING: *color = C_YELLOW, *pat = PAT_BLINK; break;
+    case ST_OK: *color = C_GREEN, *pat = PAT_SOLID; return true;
     }
     return false;
 }
 
-const char *status_led_indicator(void)
+bool status_rgb_enabled(void)
 {
-    return g_cfg.sled_pin == STATUS_LED_DISABLED ? "disabled" : s_indicator;
+    return g_cfg.sled_pin != STATUS_LED_DISABLED;
 }
 
 static void led_task(void *arg)
@@ -142,7 +129,10 @@ static void led_task(void *arg)
             if (ok_since_ms < 0) {
                 ok_since_ms = now_ms;
             }
-            if (!g_cfg.sled_always_on && now_ms - ok_since_ms >= OK_HOLD_MS) {
+            // BOOT ボタンを短く押したら、もう一度しばらく点灯する
+            int64_t wake_ms = status_wake_at_us() / 1000;
+            int64_t since_ms = wake_ms > ok_since_ms ? wake_ms : ok_since_ms;
+            if (!g_cfg.sled_always_on && now_ms - since_ms >= OK_HOLD_MS) {
                 pat = PAT_OFF;
             }
         } else {
@@ -150,10 +140,11 @@ static void led_task(void *arg)
         }
 
         rgb_t out = blink_on(pat, now_ms) ? color : C_BLACK;
-        if (now_us < s_pulse_until_us) {
+        int64_t pulse_us = status_pulse_at_us();
+        if (pulse_us && now_us < pulse_us + PULSE_MS * 1000) {
             out = C_GREEN;
         }
-        if (now_us < s_identify_until_us) {
+        if (now_us < status_identify_until_us()) {
             out = blink_on(PAT_BLINK_FAST, now_ms) ? C_WHITE : C_BLACK;
         }
         // 明るさは Home Assistant から再起動せずに変えられるので、色が同じでも送り直す
@@ -165,22 +156,7 @@ static void led_task(void *arg)
     }
 }
 
-void status_led_set_hint(status_hint_t hint)
-{
-    s_hint = hint;
-}
-
-void status_led_pulse(void)
-{
-    s_pulse_until_us = esp_timer_get_time() + PULSE_MS * 1000;
-}
-
-void status_led_identify(uint32_t ms)
-{
-    s_identify_until_us = esp_timer_get_time() + (int64_t)ms * 1000;
-}
-
-void status_led_start(void)
+void status_rgb_start(void)
 {
     if (g_cfg.sled_pin == STATUS_LED_DISABLED) {
         ESP_LOGI(TAG, "status LED disabled");

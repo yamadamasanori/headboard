@@ -1,5 +1,5 @@
-# ESP32-S3 N16R8（フラッシュ 16MB、オクタル PSRAM 8MB）用
-CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+# ESP32-S3 用。対応するボード（N16R8、XIAO ESP32S3）はどちらもオクタル PSRAM 8MB を持つ。
+# フラッシュの大きさなど、ボードごとの設定は sdkconfig.defaults.n16r8 / sdkconfig.defaults.xiao
 CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y

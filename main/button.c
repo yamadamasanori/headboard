@@ -13,8 +13,6 @@ static const char *TAG = "button";
 
 #define BUTTON_GPIO      GPIO_NUM_0
 #define POLL_MS          50
-#define WIFI_RESET_MS    3000
-#define FACTORY_RESET_MS 10000
 
 static void button_task(void *arg)
 {
@@ -29,24 +27,28 @@ static void button_task(void *arg)
         }
         if (level == 0) {  // 押すと Low
             held_ms += POLL_MS;
-            if (held_ms == WIFI_RESET_MS) {
+            status_led_button(held_ms);
+            if (held_ms == BUTTON_WIFI_RESET_MS) {
                 ESP_LOGI(TAG, "release now to clear Wi-Fi settings (keep holding for full reset)");
-                status_led_set_hint(STATUS_HINT_WIFI_RESET);
-            } else if (held_ms == FACTORY_RESET_MS) {
+            } else if (held_ms == BUTTON_FACTORY_RESET_MS) {
                 ESP_LOGI(TAG, "release now to clear all settings");
-                status_led_set_hint(STATUS_HINT_FACTORY_RESET);
             }
             continue;
         }
-        if (held_ms >= FACTORY_RESET_MS) {
+        if (held_ms >= BUTTON_FACTORY_RESET_MS) {
             ESP_LOGW(TAG, "factory reset by button");
             config_factory_reset();
             ts_factory_reset();
             restart_now();
-        } else if (held_ms >= WIFI_RESET_MS) {
+        } else if (held_ms >= BUTTON_WIFI_RESET_MS) {
             ESP_LOGW(TAG, "Wi-Fi settings cleared by button");
             config_clear_wifi();
             restart_now();
+        } else if (held_ms > 0) {
+            status_led_wake();
+        }
+        if (held_ms > 0) {
+            status_led_button(0);
         }
         held_ms = 0;
     }

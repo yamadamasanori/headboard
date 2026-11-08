@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "app_config.h"
+#include "board.h"
 #include "broker.h"
 #include "driver/temperature_sensor.h"
 #include "esp_app_desc.h"
@@ -31,7 +32,7 @@ static const char *TAG = "ha";
 #define IDENTIFY_MS       10000
 #define UPDATE_URL        CONFIG_HEADBOARD_UPDATE_URL
 #define RELEASE_URL       CONFIG_HEADBOARD_RELEASE_URL
-#define OTA_FILE          "firmware/headboard-led-ota.bin"
+#define OTA_FILE          "firmware/" BOARD_FW_PREFIX "-ota.bin"
 
 // ha_task への依頼
 #define REQ_PUBLISH   (1u << 0)
@@ -99,7 +100,7 @@ static const entity_t ENTITIES[] = {
     {"sensor", "min_free_internal", "内蔵 RAM の空きの最小値", CAT_DIAG, WHEN_ALWAYS, V("min_free_internal"), "data_size", "B", "measurement", 0, NULL},
     {"sensor", "free_psram", "PSRAM の空き", CAT_DIAG, WHEN_ALWAYS, V("free_psram"), "data_size", "B", "measurement", 0, NULL},
     {"sensor", "temperature", "チップの温度", CAT_DIAG, WHEN_ALWAYS, V("temperature"), "temperature", "°C", "measurement", 1, NULL},
-    {"sensor", "status_led", "状態表示 LED の表示", CAT_DIAG, WHEN_ALWAYS, V("status_led"), NULL, NULL, NULL, -1, "mdi:led-on"},
+    {"sensor", "status_led", BOARD_STATUS_NAME "の表示", CAT_DIAG, WHEN_ALWAYS, V("status_led"), NULL, NULL, NULL, -1, "mdi:led-on"},
     {"sensor", "boot_count", "起動した回数", CAT_DIAG, WHEN_ALWAYS, V("boot_count"), NULL, NULL, "total_increasing", 0, "mdi:counter"},
     {"sensor", "brownout_count", "電圧低下による再起動の回数", CAT_DIAG, WHEN_ALWAYS, V("brownout_count"), NULL, NULL, "total_increasing", 0, "mdi:flash-alert"},
     {"sensor", "abnormal_reset_count", "クラッシュによる再起動の回数", CAT_DIAG, WHEN_ALWAYS, V("abnormal_reset_count"), NULL, NULL, "total_increasing", 0, "mdi:bug"},
@@ -125,8 +126,8 @@ static const entity_t ENTITIES[] = {
     {"button", "identify", "本体を光らせる", CAT_CONFIG, WHEN_ALWAYS, NULL, "identify", NULL, NULL, -1, NULL},
     {"button", "check_update", "更新を確認", CAT_CONFIG, WHEN_UPDATE, NULL, NULL, NULL, NULL, -1, "mdi:cloud-refresh"},
     {"button", "reset_usage", "累計をクリア", CAT_CONFIG_OFF, WHEN_ALWAYS, NULL, NULL, NULL, NULL, -1, "mdi:counter"},
-    {"number", "sled_brightness", "状態表示 LED の明るさ", CAT_CONFIG, WHEN_ALWAYS, V("cfg.sled_brightness"), NULL, NULL, NULL, -1, "mdi:brightness-6"},
-    {"switch", "sled_always_on", "状態表示 LED を常に点灯", CAT_CONFIG, WHEN_ALWAYS, ON_OFF("cfg.sled_always_on"), NULL, NULL, NULL, -1, "mdi:led-on"},
+    {"number", "sled_brightness", BOARD_STATUS_NAME "の明るさ", CAT_CONFIG, WHEN_ALWAYS, V("cfg.sled_brightness"), NULL, NULL, NULL, -1, "mdi:brightness-6"},
+    {"switch", "sled_always_on", BOARD_STATUS_NAME "を常に" BOARD_STATUS_ON, CAT_CONFIG, WHEN_ALWAYS, ON_OFF("cfg.sled_always_on"), NULL, NULL, NULL, -1, "mdi:led-on"},
     {"switch", "log_verbose", "詳細ログ", CAT_CONFIG, WHEN_ALWAYS, ON_OFF("cfg.log_verbose"), NULL, NULL, NULL, -1, "mdi:text-box-search-outline"},
 
     // 更新（state_topic は <base>/update、command_topic は <base>/update/set）
@@ -141,7 +142,7 @@ void ha_add_device(cJSON *o)
     cJSON_AddItemToArray(ids, cJSON_CreateString(config_device_id()));
     cJSON_AddStringToObject(dev, "name", g_cfg.device_name);
     cJSON_AddStringToObject(dev, "manufacturer", "DIY");
-    cJSON_AddStringToObject(dev, "model", "ESP32 Headboard LED");
+    cJSON_AddStringToObject(dev, "model", BOARD_MODEL);
     cJSON_AddStringToObject(dev, "sw_version", FW_VERSION);
     char url[48];
     snprintf(url, sizeof(url), "http://%s.local/", config_hostname());
@@ -392,7 +393,7 @@ static void install_update(void)
         err = esp_https_ota_get_img_desc(h, &desc);
         if (err == ESP_OK && strncmp(desc.project_name, esp_app_get_description()->project_name,
                                      sizeof(desc.project_name)) != 0) {
-            ESP_LOGE(TAG, "update rejected: different project (%.32s)", desc.project_name);
+            ESP_LOGE(TAG, "update rejected: different project or board (%.32s)", desc.project_name);
             err = ESP_ERR_INVALID_VERSION;
         }
     }

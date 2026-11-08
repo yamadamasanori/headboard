@@ -13,7 +13,13 @@ if git ls-files --error-unmatch "$KEY" >/dev/null 2>&1; then
     exit 1
 fi
 . "$IDF_PATH/export.sh"
+# ボードごとにビルドする（sdkconfig とビルドのディレクトリも分ける。CMakeLists.txt）
+#   N16R8 : sdkconfig      / build      → web/、web/firmware/headboard-led-*.bin
+#   XIAO  : sdkconfig.xiao / build-xiao → web/xiao/、web/xiao/firmware/headboard-led-xiao-*.bin
 idf.py set-target esp32s3 build
-python tools/package_web.py
+python tools/package_web.py build
+idf.py -B build-xiao -DHB_BOARD=xiao set-target esp32s3 build
+python tools/package_web.py build-xiao
 # 公開する更新用のファームが、keys/ の公開鍵で確かめられることを確認する
 espsecure.py verify_signature --version 2 --keyfile keys/headboard-signing-pubkey.pem web/firmware/headboard-led-ota.bin
+espsecure.py verify_signature --version 2 --keyfile keys/headboard-signing-pubkey.pem web/xiao/firmware/headboard-led-xiao-ota.bin

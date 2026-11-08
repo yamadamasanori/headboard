@@ -1,5 +1,20 @@
 menu "ヘッドボードLED"
 
+choice HEADBOARD_BOARD
+    prompt "ボード"
+    default HEADBOARD_BOARD_N16R8
+    help
+        ボードは sdkconfig.defaults.<ボード> で決まります。ここでは変えず、
+        idf.py に -DHB_BOARD=<ボード> を付けてビルドしてください（CMakeLists.txt）。
+
+config HEADBOARD_BOARD_N16R8
+    bool "ESP32-S3 N16R8（DevKitC-1 互換。状態表示は基板上のフルカラー LED）"
+
+config HEADBOARD_BOARD_XIAO
+    bool "Seeed Studio XIAO ESP32S3（状態表示は SSD1306 の OLED）"
+
+endchoice
+
 config HEADBOARD_USB_SETUP
     bool "USB から設定を変更できるようにする（開発用）"
     default n
@@ -10,9 +25,11 @@ config HEADBOARD_USB_SETUP
 
 config HEADBOARD_UPDATE_URL
     string "ファームウェアの配布元（Home Assistant からの更新用）"
+    default "https://yamadamasanori.github.io/headboard/xiao/" if HEADBOARD_BOARD_XIAO
     default "https://yamadamasanori.github.io/headboard/"
     help
-        manifest.json と firmware/headboard-led-ota.bin を置いた URL（末尾は /）。
+        manifest.json と firmware/headboard-led-ota.bin（XIAO は firmware/headboard-led-xiao-ota.bin）
+        を置いた URL（末尾は /）。ボードごとに分けます。
         本体が 6 時間ごとに manifest.json を見て新しい版を探し、Home Assistant の
         「更新」から書き込めるようにします。空にすると、この機能を使いません。
         HTTPS で取得し、サーバーの証明書を確かめます。

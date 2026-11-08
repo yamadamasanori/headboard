@@ -129,7 +129,7 @@ static void on_mqtt_data(esp_mqtt_event_handle_t ev)
         if (strcmp(topic, set_t) == 0) {
             ESP_LOGI(TAG, "%s <- %.*s", leds_key(i), ev->data_len, ev->data);
             leds_apply_command(i, ev->data, ev->data_len);
-            status_led_pulse();
+            status_led_pulse(i);
             return;
         }
     }

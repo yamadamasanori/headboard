@@ -16,6 +16,7 @@
 #include "mbedtls/x509_crt.h"
 #include "nvs.h"
 #include "nvs_flash.h"
+#include "board.h"
 #include "usage.h"
 
 #if !CONFIG_IDF_TARGET_ESP32S3
@@ -53,9 +54,17 @@ static void set_defaults(void)
     memset(&g_cfg, 0, sizeof(g_cfg));
     g_cfg.mqtt_port = 1883;
     strlcpy(g_cfg.device_name, "ヘッドボード", sizeof(g_cfg.device_name));
-    g_cfg.pin_reading = 4;
-    g_cfg.pin_backlight = 5;
-    g_cfg.sled_pin = 48;  // ESP32-S3-DevKitC-1 互換ボードのオンボード RGB LED
+    g_cfg.pin_reading = BOARD_PIN_READING;
+    g_cfg.pin_backlight = BOARD_PIN_BACKLIGHT;
+#if BOARD_HAS_OLED
+    g_cfg.sled_pin = STATUS_LED_DISABLED;
+    g_cfg.oled_sda = BOARD_OLED_SDA;
+    g_cfg.oled_scl = BOARD_OLED_SCL;
+#else
+    g_cfg.sled_pin = BOARD_SLED_PIN;  // ESP32-S3-DevKitC-1 互換ボードのオンボード RGB LED
+    g_cfg.oled_sda = STATUS_LED_DISABLED;  // OLED は設定ページで SDA・SCL を入れたときだけ使う
+    g_cfg.oled_scl = STATUS_LED_DISABLED;
+#endif
     g_cfg.sled_brightness = 32;
     g_cfg.sled_always_on = false;
     g_cfg.pwm_freq = 5000;
@@ -185,6 +194,11 @@ void config_load(void)
     }
     load_str(h, "ts_key", g_cfg.ts_authkey, sizeof(g_cfg.ts_authkey));
     nvs_get_u8(h, "sled_pin", &g_cfg.sled_pin);
+    nvs_get_u8(h, "oled_sda", &g_cfg.oled_sda);
+    nvs_get_u8(h, "oled_scl", &g_cfg.oled_scl);
+    if (nvs_get_u8(h, "oled_flip", &flag) == ESP_OK) {
+        g_cfg.oled_flip = flag != 0;
+    }
     nvs_get_u8(h, "sled_bri", &g_cfg.sled_brightness);
     if (nvs_get_u8(h, "sled_on", &flag) == ESP_OK) {
         g_cfg.sled_always_on = flag != 0;
@@ -238,6 +252,9 @@ esp_err_t config_save(void)
     NVS_SET(nvs_set_str(h, "ts_key", g_cfg.ts_authkey));
     NVS_SET(nvs_set_str(h, "ts_host", g_cfg.ts_hostname));
     NVS_SET(nvs_set_u8(h, "sled_pin", g_cfg.sled_pin));
+    NVS_SET(nvs_set_u8(h, "oled_sda", g_cfg.oled_sda));
+    NVS_SET(nvs_set_u8(h, "oled_scl", g_cfg.oled_scl));
+    NVS_SET(nvs_set_u8(h, "oled_flip", g_cfg.oled_flip ? 1 : 0));
     NVS_SET(nvs_set_u8(h, "sled_bri", g_cfg.sled_brightness));
     NVS_SET(nvs_set_u8(h, "sled_on", g_cfg.sled_always_on ? 1 : 0));
     NVS_SET(nvs_set_u8(h, "log_verb", g_cfg.log_verbose ? 1 : 0));
@@ -307,6 +324,7 @@ bool config_take_ts_reset_flag(void)
 void config_to_json(cJSON *o)
 {
     cJSON_AddStringToObject(o, "device_id", config_device_id());
+    cJSON_AddStringToObject(o, "board", BOARD_ID);  // 読むだけ。設定ページで、ボードに合う項目を出すため
     cJSON_AddStringToObject(o, "device_name", g_cfg.device_name);
     cJSON_AddStringToObject(o, "wifi_ssid", g_cfg.wifi_ssid);
     cJSON_AddBoolToObject(o, "wifi_pass_set", g_cfg.wifi_pass[0] != 0);
@@ -324,7 +342,12 @@ void config_to_json(cJSON *o)
     cJSON_AddBoolToObject(o, "tailnet_only", g_cfg.tailnet_only);
     cJSON_AddBoolToObject(o, "ts_authkey_set", g_cfg.ts_authkey[0] != 0);
     cJSON_AddStringToObject(o, "ts_hostname", g_cfg.ts_hostname);
+#if !BOARD_HAS_OLED
     cJSON_AddNumberToObject(o, "sled_pin", g_cfg.sled_pin == STATUS_LED_DISABLED ? -1 : g_cfg.sled_pin);
+#endif
+    cJSON_AddNumberToObject(o, "oled_sda", g_cfg.oled_sda == STATUS_LED_DISABLED ? -1 : g_cfg.oled_sda);
+    cJSON_AddNumberToObject(o, "oled_scl", g_cfg.oled_scl == STATUS_LED_DISABLED ? -1 : g_cfg.oled_scl);
+    cJSON_AddBoolToObject(o, "oled_flip", g_cfg.oled_flip);
     cJSON_AddNumberToObject(o, "sled_brightness", g_cfg.sled_brightness);
     cJSON_AddBoolToObject(o, "sled_always_on", g_cfg.sled_always_on);
     cJSON_AddBoolToObject(o, "log_verbose", g_cfg.log_verbose);
@@ -446,6 +469,8 @@ static bool apply_json(app_config_t *c, const cJSON *o, char *err, size_t err_le
 {
     int port = c->mqtt_port, pr = c->pin_reading, pb = c->pin_backlight, freq = c->pwm_freq;
     int sp = c->sled_pin == STATUS_LED_DISABLED ? -1 : c->sled_pin, sb = c->sled_brightness;
+    int sda = c->oled_sda == STATUS_LED_DISABLED ? -1 : c->oled_sda;
+    int scl = c->oled_scl == STATUS_LED_DISABLED ? -1 : c->oled_scl;
 
     if (!take_str(o, "wifi_ssid", c->wifi_ssid, sizeof(c->wifi_ssid), err, err_len) ||
         !take_str(o, "wifi_pass", c->wifi_pass, sizeof(c->wifi_pass), err, err_len) ||
@@ -460,7 +485,11 @@ static bool apply_json(app_config_t *c, const cJSON *o, char *err, size_t err_le
         !take_int(o, "pin_reading", 0, 48, &pr, err, err_len) ||
         !take_int(o, "pin_backlight", 0, 48, &pb, err, err_len) ||
         !take_int(o, "pwm_freq", 100, 20000, &freq, err, err_len) ||
+#if !BOARD_HAS_OLED
         !take_int(o, "sled_pin", -1, 48, &sp, err, err_len) ||
+#endif
+        !take_int(o, "oled_sda", -1, 48, &sda, err, err_len) ||
+        !take_int(o, "oled_scl", -1, 48, &scl, err, err_len) ||
         !take_int(o, "sled_brightness", 1, 255, &sb, err, err_len) ||
         !take_watt(o, "watt_reading", &c->watt_reading, err, err_len) ||
         !take_watt(o, "watt_backlight", &c->watt_backlight, err, err_len)) {
@@ -478,6 +507,15 @@ static bool apply_json(app_config_t *c, const cJSON *o, char *err, size_t err_le
         snprintf(err, err_len, "読書灯とバックライトに同じ GPIO は使えません");
         return false;
     }
+    if ((sda < 0) != (scl < 0)) {
+        snprintf(err, err_len, "OLED を使わないときは、SDA と SCL の両方を -1 にしてください");
+        return false;
+    }
+    if (sda >= 0 && (!valid_output_pin(sda) || !valid_output_pin(scl) || sda == scl ||
+                     sda == pr || sda == pb || scl == pr || scl == pb || sda == sp || scl == sp)) {
+        snprintf(err, err_len, "OLED（SDA・SCL）に使えない GPIO が指定されています");
+        return false;
+    }
     if (!c->device_name[0]) {
         snprintf(err, err_len, "device_name を入力してください");
         return false;
@@ -489,6 +527,7 @@ static bool apply_json(app_config_t *c, const cJSON *o, char *err, size_t err_le
         {"pwm_invert", &c->pwm_invert},
         {"ts_enabled", &c->ts_enabled},
         {"sled_always_on", &c->sled_always_on},
+        {"oled_flip", &c->oled_flip},
         {"log_verbose", &c->log_verbose},
         {"mqtt_tls", &c->mqtt_tls},
         {"tailnet_only", &c->tailnet_only},
@@ -535,6 +574,8 @@ static bool apply_json(app_config_t *c, const cJSON *o, char *err, size_t err_le
     c->pin_backlight = pb;
     c->pwm_freq = freq;
     c->sled_pin = sp < 0 ? STATUS_LED_DISABLED : sp;
+    c->oled_sda = sda < 0 ? STATUS_LED_DISABLED : sda;
+    c->oled_scl = scl < 0 ? STATUS_LED_DISABLED : scl;
     c->sled_brightness = sb;
     return true;
 }

@@ -153,3 +153,21 @@ void net_get_state(net_state_t *st)
     st->mqtt_refused = broker_is_refused();
     st->ble_setup = prov_is_active();
 }
+
+bool net_get_link(char ip[16], int *rssi)
+{
+    ip[0] = 0;
+    *rssi = 0;
+    if (!s_wifi_up || !s_netif) {
+        return false;
+    }
+    esp_netif_ip_info_t info;
+    if (esp_netif_get_ip_info(s_netif, &info) == ESP_OK) {
+        snprintf(ip, 16, IPSTR, IP2STR(&info.ip));
+    }
+    wifi_ap_record_t ap;
+    if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+        *rssi = ap.rssi;
+    }
+    return true;
+}

@@ -8,6 +8,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include "app_config.h"
+#include "board.h"
 #include "commands.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
@@ -298,6 +299,7 @@ static esp_err_t h_info(httpd_req_t *req)
     cJSON *o = cJSON_CreateObject();
     cJSON_AddStringToObject(o, "firmware", "headboard-led");
     cJSON_AddStringToObject(o, "version", FW_VERSION);
+    cJSON_AddStringToObject(o, "board", BOARD_ID);
     cJSON_AddStringToObject(o, "device_id", config_device_id());
     cJSON_AddStringToObject(o, "hostname", config_hostname());
     char *s = cJSON_PrintUnformatted(o);

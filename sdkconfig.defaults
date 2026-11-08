@@ -1,4 +1,4 @@
-# 共通の設定。ESP32-S3 N16R8 用の設定は sdkconfig.defaults.esp32s3
+# 共通の設定。ESP32-S3 用の設定は sdkconfig.defaults.esp32s3、ボードごとの設定は sdkconfig.defaults.<ボード>
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_ESP_CONSOLE_UART_DEFAULT=y

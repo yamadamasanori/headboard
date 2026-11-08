@@ -6,7 +6,7 @@
 #include "cJSON.h"
 #include "esp_err.h"
 
-#define FW_VERSION "2.5.0"
+#define FW_VERSION "2.6.0"
 
 #define STATUS_LED_DISABLED 0xFF
 #define MQTT_CA_MAX 2560      // CA 証明書（PEM）の最大の長さ（終端を含む）。RSA 4096 bit の証明書まで入る
@@ -29,9 +29,12 @@ typedef struct {
     bool tailnet_only;      // 本体の設定ページ（と更新）を tailnet からだけ受け付ける
     char ts_authkey[128];   // Tailscale の認証キー（tskey-auth-...）
     char ts_hostname[64];   // tailnet 上のホスト名
-    uint8_t sled_pin;       // 状態表示 LED（WS2812）の GPIO。STATUS_LED_DISABLED で使わない
-    uint8_t sled_brightness;// 状態表示 LED の明るさ 1〜255
-    bool sled_always_on;    // 正常時も点灯し続ける（false なら 10 秒後に消灯）
+    uint8_t sled_pin;       // 状態表示 LED（WS2812。N16R8）の GPIO。STATUS_LED_DISABLED で使わない
+    uint8_t oled_sda;       // 状態表示の OLED（SSD1306。XIAO は標準、N16R8 は任意）の SDA の GPIO。STATUS_LED_DISABLED で使わない
+    uint8_t oled_scl;       // 同じく SCL の GPIO
+    bool oled_flip;         // OLED の表示を 180° 回す
+    uint8_t sled_brightness;// 状態表示（LED・OLED）の明るさ 1〜255
+    bool sled_always_on;    // 正常時も表示し続ける（false なら 10 秒後に消す）
     bool log_verbose;       // Tailscale などの詳細ログも出す（調査用）
     float watt_reading;     // 読書灯の定格消費電力 [W]（消費電力の推定用）
     float watt_backlight;   // バックライトの定格消費電力 [W]

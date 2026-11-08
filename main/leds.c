@@ -219,6 +219,14 @@ float leds_output_ratio(light_id_t id)
     return s_max_duty ? (float)level_to_duty(level) / s_max_duty : 0.0f;
 }
 
+void leds_get(light_id_t id, bool *on, uint8_t *brightness)
+{
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    *on = s_lights[id].on;
+    *brightness = s_lights[id].brightness;
+    xSemaphoreGive(s_lock);
+}
+
 void leds_state_to_json(light_id_t id, cJSON *o)
 {
     xSemaphoreTake(s_lock, portMAX_DELAY);

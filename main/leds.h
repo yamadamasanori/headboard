@@ -34,6 +34,9 @@ void leds_set(light_id_t id, bool on, int brightness, uint32_t transition_ms);
 // いまの出力のデューティ比（0〜1、フェード中は途中の値。消費電力の推定用）
 float leds_output_ratio(light_id_t id);
 
+// 現在の状態（brightness は最後に設定された明るさ 0〜255。消灯中も保持）
+void leds_get(light_id_t id, bool *on, uint8_t *brightness);
+
 // 現在の状態を Home Assistant 形式の JSON で返す（呼び出し側で free）
 char *leds_state_json(light_id_t id);
 void leds_state_to_json(light_id_t id, cJSON *obj);

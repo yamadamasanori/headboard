@@ -13,6 +13,8 @@ void ts_on_wifi_up(ts_connected_cb_t on_connected);
 bool ts_is_connected(void);
 // 本体の tailnet 上の IP アドレス（ホストバイトオーダー）。tailnet に繋がっていなければ 0
 uint32_t ts_vpn_ip(void);
+// tailnet の IP アドレスを文字列で返す（繋がっていなければ空）
+void ts_vpn_ip_str(char out[16]);
 // 認証失敗などで止まっている
 bool ts_has_error(void);
 

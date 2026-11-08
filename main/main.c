@@ -2,7 +2,7 @@
 //   - 読書灯 / バックライトの 2 系統を PWM で個別に調光
 //   - MQTT で Home Assistant から操作（自動探索対応）
 //   - Wi-Fi は Bluetooth（スマホの公式アプリ）で設定し、その他は本体の設定ページで設定
-//   - オンボード LED で接続状態を表示
+//   - 接続状態を表示（N16R8 は基板上のフルカラー LED、XIAO ESP32S3 は SSD1306 の OLED）
 
 #include "app_config.h"
 #include "button.h"

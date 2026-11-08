@@ -24,3 +24,6 @@ void net_diag_to_json(cJSON *obj);
 
 // 状態表示 LED 用に、接続状態をまとめて返す
 void net_get_state(net_state_t *st);
+
+// 状態表示用に、LAN の IP アドレスと電波の強さ [dBm] を返す。Wi-Fi に繋がっていなければ false
+bool net_get_link(char ip[16], int *rssi);

@@ -3,6 +3,8 @@
 #include <stdio.h>
 #include <string.h>
 #include "app_config.h"
+#include "board.h"
+#include "esp_flash.h"
 #include "esp_chip_info.h"
 #include "esp_system.h"
 #include "esp_heap_caps.h"
@@ -64,6 +66,12 @@ cJSON *cmd_hello(cmd_src_t src)
     cJSON_AddStringToObject(o, "version", FW_VERSION);
     cJSON_AddStringToObject(o, "device_id", config_device_id());
     cJSON_AddStringToObject(o, "chip", CONFIG_IDF_TARGET);
+    cJSON_AddStringToObject(o, "board", BOARD_ID);
+    // フラッシュの実際の大きさ。別のボード用を書き込んだとき（N16R8 用を XIAO に、など）に、設定ページで知らせる
+    uint32_t flash_size = 0;
+    if (esp_flash_get_physical_size(NULL, &flash_size) == ESP_OK) {
+        cJSON_AddNumberToObject(o, "flash_mb", flash_size / (1024 * 1024));
+    }
     cJSON_AddNumberToObject(o, "chip_revision", chip.revision);
     cJSON_AddBoolToObject(o, "usb_setup", USB_SETUP);
     cJSON_AddStringToObject(o, "hostname", config_hostname());

@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include "board.h"
 #include "esp_app_desc.h"
 #include "esp_app_format.h"
 #include "esp_log.h"
@@ -29,12 +30,18 @@ bool ota_check_header(const uint8_t *buf, size_t len, char *err, size_t err_len)
     const esp_app_desc_t *d = (const esp_app_desc_t *)(buf + desc_off);
     if (d->magic_word != ESP_APP_DESC_MAGIC_WORD) {
         // 先頭がブートローダー（USB 書き込み用の headboard-led-boot.bin や、2.3.0 までの結合ファイル）だとここに来る
-        snprintf(err, err_len, "更新用のファイルではありません。headboard-led-ota.bin を選んでください");
+        snprintf(err, err_len, "更新用のファイルではありません。" BOARD_FW_PREFIX "-ota.bin を選んでください");
         return false;
     }
     const esp_app_desc_t *self = esp_app_get_description();
+    // ボードごとにプロジェクト名が違う（N16R8 は headboard_led、XIAO は headboard_led_xiao）
     if (strncmp(d->project_name, self->project_name, sizeof(d->project_name)) != 0) {
-        snprintf(err, err_len, "別のプロジェクトのファームウェアです（%.32s）", d->project_name);
+        if (strncmp(d->project_name, "headboard_led", 13) == 0) {
+            snprintf(err, err_len, "別のボード用のファームウェアです（%.32s）。" BOARD_FW_PREFIX "-ota.bin を選んでください",
+                     d->project_name);
+        } else {
+            snprintf(err, err_len, "別のプロジェクトのファームウェアです（%.32s）", d->project_name);
+        }
         return false;
     }
     const esp_image_header_t *h = (const esp_image_header_t *)buf;
