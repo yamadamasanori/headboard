@@ -184,6 +184,9 @@ microlink_t *microlink_init(const microlink_config_t *config) {
     ml->stun_sock = -1;
     ml->stun_sock6 = -1;
     ml->derp.sockfd = -1;
+    for (int i = 0; i < ML_DERP_MAX_ALT; i++) {
+        ml->derp_alt[i].sockfd = -1;  /* headboard: foreign-region DERP slots */
+    }
 
     /* Resolve timing (0 = use defaults from #defines) */
     ml->t_disco_heartbeat_ms = ml->config.disco_heartbeat_ms ? ml->config.disco_heartbeat_ms : ML_DISCO_HEARTBEAT_MS;

@@ -203,6 +203,7 @@ typedef struct {
     uint8_t *data;              /* Heap-allocated payload (caller frees on failure) */
     size_t len;                 /* Payload length */
     uint8_t frame_type;         /* DERP frame type (0x04 = SendPacket) */
+    uint16_t region;            /* headboard: destination peer's home DERP region (0 = ours) */
 } ml_derp_tx_item_t;
 
 /* Received packet (from net_io to disco/wg queues) */
@@ -339,7 +340,19 @@ typedef struct {
     mbedtls_ctr_drbg_context ctr_drbg;
     bool connected;
     uint64_t last_recv_ms;          /* For keepalive watchdog */
+    /* headboard: secondary ("foreign region") connections, see ml_derp.c */
+    uint16_t region;                /* Region this connection serves (alt slots only) */
+    uint64_t last_used_ms;          /* Last packet sent/received (alt slots: idle close) */
+    uint64_t retry_after_ms;        /* After a failed connect, don't retry before this */
 } ml_derp_conn_t;
+
+/* headboard: maximum number of extra DERP connections to peers' home regions.
+ * Real Tailscale clients send to a peer through the peer's home DERP region
+ * (DERP servers in different regions do not forward to each other). Each
+ * connection costs one TLS session in internal RAM, so keep this small. */
+#ifndef ML_DERP_MAX_ALT
+#define ML_DERP_MAX_ALT         1
+#endif
 
 /* ============================================================================
  * Main Context
@@ -382,6 +395,7 @@ struct microlink_s {
     /* DERP connection (owned exclusively by DERP I/O task after connect) */
     /* Connection setup by coord task, then handed to DERP I/O task */
     ml_derp_conn_t derp;
+    ml_derp_conn_t derp_alt[ML_DERP_MAX_ALT];  /* headboard: peers' home regions */
 
     /* Sockets for net_io select() loop */
     int disco_sock4;                    /* UDP socket for DISCO + direct WG */

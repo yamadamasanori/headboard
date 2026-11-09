@@ -18,5 +18,12 @@ headboard-led local patches:
   - #32 deeper WG/DISCO RX queues, blocking receive in ml_wg_mgr, drain the DISCO socket
     (the trailing vTaskDelay hunk was applied by hand after #30)
   - #21 don't install unvalidated peer endpoints at peer-add (DERP until DISCO validates)
+- ml_derp.c: send to a peer through the peer's home DERP region (up to ML_DERP_MAX_ALT=1 extra
+  connection, opened on demand, read like the home connection, closed after 60 s idle; only when
+  enough memory is free (>= 96 KB PSRAM with CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC, which headboard
+  sets), otherwise the home connection is used as before). Upstream only
+  connected to its own home region, so peers homed elsewhere (e.g. a Home Assistant on a US VM,
+  region 10, while we are in Tokyo, region 7) were unreachable without a direct UDP path.
+  ml_derp_tx_item_t has a region field, ml_derp_conn_t has region/last_used_ms/retry_after_ms
 - Known remaining: wireguardif_network_rx() still runs on the wg_mgr task, so peer keypair
   state is shared with the tcpip_thread output path without a lock (headboard issue #1)
