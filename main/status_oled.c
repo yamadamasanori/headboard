@@ -46,10 +46,12 @@ static const char *TAG = "status_oled";
 #define SHIFT_MS        60000    // 焼き付き対策で表示をずらす間隔
 #define I2C_HZ          400000
 #define I2C_TIMEOUT_MS  100
+#define POWERUP_MS      500      // 電源を入れてから OLED が応えるようになるまで待つ時間
+#define RETRY_MS        2000     // 見つからない・書き込みに失敗したときに、探し直す間隔
 
 static i2c_master_bus_handle_t s_bus;
 static i2c_master_dev_handle_t s_dev;
-static bool s_ready;
+static volatile bool s_ready;  // OLED が見つかって、初期化できている
 static uint8_t s_fb[W * H / 8];       // 1 バイトが縦 8 ドット（SSD1306 のページ形式）
 static uint8_t s_tx[1 + sizeof(s_fb)];  // 送信用。先頭は制御バイト 0x40（データ）
 static int s_shift;
@@ -136,7 +138,7 @@ static esp_err_t set_power(bool on)
     return CMD(on ? 0xAF : 0xAE);
 }
 
-static esp_err_t oled_init(void)
+static esp_err_t oled_init(bool flip, uint8_t brightness)
 {
     static const uint8_t seq[][3] = {
         {2, 0xD5, 0x80},  // 表示クロック
@@ -155,10 +157,10 @@ static esp_err_t oled_init(void)
         err = send_cmds(&seq[i][1], seq[i][0]);
     }
     if (err == ESP_OK) {
-        err = set_flip(g_cfg.oled_flip);
+        err = set_flip(flip);
     }
     if (err == ESP_OK) {
-        err = set_brightness(g_cfg.sled_brightness);
+        err = set_brightness(brightness);
     }
     if (err == ESP_OK) {
         memset(s_fb, 0, sizeof(s_fb));
@@ -485,22 +487,84 @@ static void draw_boot(void)
 
 // ---------------------------------------------------------------- タスク
 
+// OLED を探して初期化する。アドレスは 0x3C（基板の設定で 0x3D のものもある）
+static esp_err_t oled_attach(bool flip, uint8_t brightness, bool log_missing)
+{
+    if (s_dev) {
+        i2c_master_bus_rm_device(s_dev);
+        s_dev = NULL;
+    }
+    uint16_t addr = 0;
+    for (uint16_t a = 0x3C; a <= 0x3D && !addr; a++) {
+        if (i2c_master_probe(s_bus, a, I2C_TIMEOUT_MS) == ESP_OK) {
+            addr = a;
+        }
+    }
+    if (!addr) {
+        if (log_missing) {
+            ESP_LOGE(TAG, "OLED not found on I2C (SDA GPIO%u, SCL GPIO%u). Check wiring. Retrying every %d s",
+                     g_cfg.oled_sda, g_cfg.oled_scl, RETRY_MS / 1000);
+        }
+        return ESP_ERR_NOT_FOUND;
+    }
+    i2c_device_config_t dev = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = addr,
+        .scl_speed_hz = I2C_HZ,
+    };
+    esp_err_t err = i2c_master_bus_add_device(s_bus, &dev, &s_dev);
+    if (err == ESP_OK) {
+        err = oled_init(flip, brightness);
+    }
+    if (err != ESP_OK) {
+        if (log_missing) {
+            ESP_LOGE(TAG, "OLED init failed: %s. Retrying every %d s", esp_err_to_name(err), RETRY_MS / 1000);
+        }
+        return err;
+    }
+    ESP_LOGI(TAG, "OLED (SSD1306 at 0x%02x) on SDA GPIO%u, SCL GPIO%u", addr, g_cfg.oled_sda, g_cfg.oled_scl);
+    return ESP_OK;
+}
+
 static void oled_task(void *arg)
 {
     static uint8_t sent[sizeof(s_fb)];
-    const int64_t start_ms = esp_timer_get_time() / 1000;
-    int64_t ok_since_ms = -1, last_link_ms = -1000000;
+    int64_t start_ms = 0, retry_at_ms = 0, ok_since_ms = -1, last_link_ms = -1000000;
     char ip[16] = "";
     int rssi = 0;
-    bool power = false, first = true, flip = g_cfg.oled_flip;
-    uint8_t brightness = g_cfg.sled_brightness;
+    bool power = false, first = true, flip = false, logged = false;
+    uint8_t brightness = 0;
     int fails = 0;
 
+    // 電源を入れた直後は、OLED のリセットと電源の立ち上がりが終わるまで応えないことがある
+    // （再起動のときは OLED に電源が入ったままなので、すぐ応える）
+    vTaskDelay(pdMS_TO_TICKS(POWERUP_MS));
     TickType_t wake = xTaskGetTickCount();
     for (;;) {
         vTaskDelayUntil(&wake, pdMS_TO_TICKS(TICK_MS));
         int64_t now_ms = esp_timer_get_time() / 1000;
         status_t st = status_decide();
+
+        // 見つかるまで（途中で書き込みに失敗したときも）探し直して、初期化からやり直す
+        if (!s_ready) {
+            if (now_ms < retry_at_ms) {
+                continue;
+            }
+            flip = g_cfg.oled_flip;
+            brightness = g_cfg.sled_brightness;
+            if (oled_attach(flip, brightness, !logged) != ESP_OK) {
+                logged = true;  // 外れたままのときにログが溢れないよう、1 回だけ出す
+                retry_at_ms = now_ms + RETRY_MS;
+                continue;
+            }
+            if (!start_ms) {
+                start_ms = now_ms;  // 起動時の表示は、最初に見つかったときに出す
+            }
+            s_ready = true;
+            logged = false;
+            power = false;  // oled_init は表示を消した状態で終わる
+            first = true;
+        }
         if (now_ms - last_link_ms >= 1000) {
             net_get_link(ip, &rssi);
             last_link_ms = now_ms;
@@ -560,11 +624,12 @@ static void oled_task(void *arg)
             }
         }
         if (err != ESP_OK) {
-            // 配線が外れたときなどにログが溢れないよう、最初と 1 分ごとだけ出す
-            if (fails++ % (60000 / TICK_MS) == 0) {
+            // 配線が外れた・OLED の電源が切れたときは、設定が消えているので初期化からやり直す
+            if (fails++ == 0) {
                 ESP_LOGE(TAG, "OLED write failed: %s", esp_err_to_name(err));
             }
-            first = true;  // 繋がり直したら全体を送り直す
+            s_ready = false;
+            retry_at_ms = now_ms + RETRY_MS;
         } else {
             fails = 0;
         }
@@ -573,7 +638,7 @@ static void oled_task(void *arg)
 
 bool status_oled_enabled(void)
 {
-    return s_ready;
+    return s_ready;  // 探している間・外れている間は false（設定ページには「使わない」と出る）
 }
 
 void status_oled_start(void)
@@ -594,27 +659,6 @@ void status_oled_start(void)
         ESP_LOGE(TAG, "I2C init failed (SDA GPIO%u, SCL GPIO%u)", g_cfg.oled_sda, g_cfg.oled_scl);
         return;
     }
-    // SSD1306 のアドレスは 0x3C（基板の設定で 0x3D のものもある）
-    uint16_t addr = 0;
-    for (uint16_t a = 0x3C; a <= 0x3D && !addr; a++) {
-        if (i2c_master_probe(s_bus, a, I2C_TIMEOUT_MS) == ESP_OK) {
-            addr = a;
-        }
-    }
-    if (!addr) {
-        ESP_LOGE(TAG, "OLED not found on I2C (SDA GPIO%u, SCL GPIO%u). Check wiring", g_cfg.oled_sda, g_cfg.oled_scl);
-        return;
-    }
-    i2c_device_config_t dev = {
-        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-        .device_address = addr,
-        .scl_speed_hz = I2C_HZ,
-    };
-    if (i2c_master_bus_add_device(s_bus, &dev, &s_dev) != ESP_OK || oled_init() != ESP_OK) {
-        ESP_LOGE(TAG, "OLED init failed");
-        return;
-    }
-    s_ready = true;
+    // OLED を探すのは、電源の立ち上がりを待ってからタスクの中で行う（見つかるまで探し直す）
     xTaskCreate(oled_task, "status_oled", 4096, NULL, 3, NULL);
-    ESP_LOGI(TAG, "OLED (SSD1306 at 0x%02x) on SDA GPIO%u, SCL GPIO%u", addr, g_cfg.oled_sda, g_cfg.oled_scl);
 }

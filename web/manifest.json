@@ -1,6 +1,6 @@
 {
   "name": "ヘッドボードLED（ESP32-S3 N16R8）",
-  "version": "2.6.0",
+  "version": "2.6.1",
   "new_install_prompt_erase": true,
   "builds": [
     {
