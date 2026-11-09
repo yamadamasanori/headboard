@@ -1,10 +1,9 @@
 /*
- * SPDX-FileCopyrightText: 2015-2025 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2015-2026 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
-#ifndef MDNS_PRIVATE_H_
-#define MDNS_PRIVATE_H_
+#pragma once
 
 #include "sdkconfig.h"
 #include "mdns.h"
@@ -15,11 +14,6 @@
 #include "freertos/semphr.h"
 #include "esp_timer.h"
 #include "esp_system.h"
-
-#ifdef CONFIG_MDNS_ENABLE_DEBUG_PRINTS
-#define MDNS_ENABLE_DEBUG
-#define _mdns_dbg_printf(...) printf(__VA_ARGS__)
-#endif
 
 /** Number of predefined interfaces */
 #ifndef CONFIG_MDNS_PREDEF_NETIF_STA
@@ -90,14 +84,6 @@
 #define MDNS_ANSWER_AAAA_SIZE       16
 
 #define MDNS_SERVICE_PORT           5353                    // UDP port that the server runs on
-#define MDNS_SERVICE_STACK_DEPTH    CONFIG_MDNS_TASK_STACK_SIZE
-#define MDNS_TASK_PRIORITY          CONFIG_MDNS_TASK_PRIORITY
-#if (MDNS_TASK_PRIORITY > ESP_TASK_PRIO_MAX)
-#error "mDNS task priority is higher than ESP_TASK_PRIO_MAX"
-#elif (MDNS_TASK_PRIORITY > ESP_TASKD_EVENT_PRIO)
-#warning "mDNS task priority is higher than ESP_TASKD_EVENT_PRIO, mDNS library might not work correctly"
-#endif
-#define MDNS_TASK_AFFINITY          CONFIG_MDNS_TASK_AFFINITY
 #define MDNS_SERVICE_ADD_TIMEOUT_MS CONFIG_MDNS_SERVICE_ADD_TIMEOUT_MS
 
 #define MDNS_PACKET_QUEUE_LEN       16                      // Maximum packets that can be queued for parsing
@@ -126,8 +112,7 @@
 
 #define MDNS_TIMER_PERIOD_US        (CONFIG_MDNS_TIMER_PERIOD_MS*1000)
 
-#define MDNS_SERVICE_LOCK()     xSemaphoreTake(_mdns_service_semaphore, portMAX_DELAY)
-#define MDNS_SERVICE_UNLOCK()   xSemaphoreGive(_mdns_service_semaphore)
+#define MDNS_US_PER_SEC             1000000LL
 
 #define queueToEnd(type, queue, item)       \
     if (!queue) {                           \
@@ -154,24 +139,13 @@
         }                                           \
     }
 
-#define queueFree(type, queue)  while (queue) { type * _q = queue; queue = queue->next; free(_q); }
-
-#define PCB_STATE_IS_PROBING(s) (s->state > PCB_OFF && s->state < PCB_ANNOUNCE_1)
-#define PCB_STATE_IS_ANNOUNCING(s) (s->state > PCB_PROBE_3 && s->state < PCB_RUNNING)
-#define PCB_STATE_IS_RUNNING(s) (s->state == PCB_RUNNING)
+#define queueFree(type, queue)  while (queue) { type * _q = queue; queue = queue->next; mdns_mem_free(_q); }
 
 #ifndef HOOK_MALLOC_FAILED
-#define HOOK_MALLOC_FAILED  ESP_LOGE(TAG, "Cannot allocate memory (line: %d, free heap: %" PRIu32 " bytes)", __LINE__, esp_get_free_heap_size());
+#define HOOK_MALLOC_FAILED  do { ESP_LOGE(TAG, "Cannot allocate memory (%s(%d), free heap: %" PRIu32 " bytes)", __func__, __LINE__, esp_get_free_heap_size()); } while(0)
 #endif
 
 typedef size_t mdns_if_t;
-
-typedef enum {
-    PCB_OFF, PCB_DUP, PCB_INIT,
-    PCB_PROBE_1, PCB_PROBE_2, PCB_PROBE_3,
-    PCB_ANNOUNCE_1, PCB_ANNOUNCE_2, PCB_ANNOUNCE_3,
-    PCB_RUNNING
-} mdns_pcb_state_t;
 
 typedef enum {
     MDNS_ANSWER, MDNS_NS, MDNS_EXTRA
@@ -184,8 +158,7 @@ typedef enum {
     ACTION_SEARCH_ADD,
     ACTION_SEARCH_SEND,
     ACTION_SEARCH_END,
-    ACTION_BROWSE_ADD,
-    ACTION_BROWSE_SYNC,
+    ACTION_BROWSE_START,
     ACTION_BROWSE_END,
     ACTION_TX_HANDLE,
     ACTION_RX_HANDLE,
@@ -193,9 +166,14 @@ typedef enum {
     ACTION_DELEGATE_HOSTNAME_ADD,
     ACTION_DELEGATE_HOSTNAME_REMOVE,
     ACTION_DELEGATE_HOSTNAME_SET_ADDR,
+    ACTION_BROWSE_SEND_BY_IP_PROTOCOL,
     ACTION_MAX
 } mdns_action_type_t;
 
+typedef enum {
+    ACTION_RUN,
+    ACTION_CLEANUP,
+} mdns_action_subtype_t;
 
 typedef struct {
     uint16_t id;
@@ -212,7 +190,7 @@ typedef struct {
     char proto[MDNS_NAME_BUF_LEN];
     char domain[MDNS_NAME_BUF_LEN];
     uint8_t parts;
-    uint8_t sub;
+    uint8_t sub; // 0: no subtype, 1: subtype
     bool    invalid;
 } mdns_name_t;
 
@@ -304,6 +282,7 @@ typedef struct mdns_out_question_s {
     const char *service;
     const char *proto;
     const char *domain;
+    const char *subtype;
     bool own_dynamic_memory;
 } mdns_out_question_t;
 
@@ -342,15 +321,6 @@ typedef struct mdns_tx_packet_s {
     uint16_t id;
 } mdns_tx_packet_t;
 
-typedef struct {
-    mdns_pcb_state_t state;
-    mdns_srv_item_t **probe_services;
-    uint8_t probe_services_len;
-    uint8_t probe_ip;
-    uint8_t probe_running;
-    uint16_t failed_probes;
-} mdns_pcb_t;
-
 typedef enum {
     SEARCH_OFF,
     SEARCH_INIT,
@@ -381,6 +351,7 @@ typedef struct mdns_search_once_s {
     char *instance;
     char *service;
     char *proto;
+    char *subtype;
     mdns_result_t *result;
 } mdns_search_once_t;
 
@@ -392,33 +363,8 @@ typedef struct mdns_browse_s {
 
     char *service;
     char *proto;
-    mdns_result_t *result;
+    char *subtype;
 } mdns_browse_t;
-
-typedef struct mdns_browse_result_sync_t {
-    mdns_result_t *result;
-    struct mdns_browse_result_sync_t *next;
-} mdns_browse_result_sync_t;
-
-typedef struct mdns_browse_sync {
-    mdns_browse_t *browse;
-    mdns_browse_result_sync_t *sync_result;
-} mdns_browse_sync_t;
-
-typedef struct mdns_server_s {
-    struct {
-        mdns_pcb_t pcbs[MDNS_IP_PROTOCOL_MAX];
-    } interfaces[MDNS_MAX_INTERFACES];
-    const char *hostname;
-    const char *instance;
-    mdns_srv_item_t *services;
-    QueueHandle_t action_queue;
-    SemaphoreHandle_t action_sema;
-    mdns_tx_packet_t *tx_queue_head;
-    mdns_search_once_t *search_once;
-    esp_timer_handle_t timer_handle;
-    mdns_browse_t *browse;
-} mdns_server_t;
 
 typedef struct {
     mdns_action_type_t type;
@@ -448,21 +394,112 @@ typedef struct {
             mdns_browse_t *browse;
         } browse_add;
         struct {
-            mdns_browse_sync_t *browse_sync;
-        } browse_sync;
+            mdns_if_t interface;
+            mdns_ip_protocol_t ip_protocol;
+        } browse_send;
     } data;
 } mdns_action_t;
 
-/*
- * @brief  Convert mnds if to esp-netif handle
- *
- * @param  tcpip_if     mdns supported interface as internal enum
- *
- * @return
- *     - ptr to esp-netif on success
- *     - NULL if no available netif for current interface index
+typedef enum {
+    MDNS_CACHE_CONSUMER_BROWSE     = (1U << 0),
+} mdns_cache_consumer_type_t;
+
+typedef uint8_t mdns_cache_consumer_mask_t;
+
+typedef enum {
+    // Browse update flags
+    MDNS_CACHE_RECORD_PTR           = (1U << 0), /*!< Normal PTR record updated, only notify no-subtype browses. */
+    MDNS_CACHE_RECORD_SUBTYPE       = (1U << 1), /*!< PTR record with subtype updated, only notify browse with identical subtype. */
+    // Resolver update flags
+    MDNS_CACHE_RECORD_SRV           = (1U << 2),
+    MDNS_CACHE_RECORD_TXT           = (1U << 3),
+    MDNS_CACHE_RECORD_ADDR          = (1U << 4),
+} mdns_cache_record_type_t;
+
+typedef uint8_t mdns_cache_record_mask_t;
+
+/**
+ * @brief   mDNS cache expiry structure
  */
-esp_netif_t *_mdns_get_esp_netif(mdns_if_t tcpip_if);
+typedef struct mdns_cache_expiry_s {
+    bool queued;
+    mdns_cache_record_mask_t record_mask;
+    struct mdns_cache_expiry_s *next;
 
+    struct mdns_cache_entry_s *entry;
+    struct mdns_service_cache_s *service;
+    struct mdns_cache_addr_s *addr;
+    struct mdns_cache_subtype_s *subtype;
+    int64_t expires_at_us;  /*!< record absolute expiration time in microseconds */
+} mdns_cache_expiry_t;
 
-#endif /* MDNS_PRIVATE_H_ */
+/**
+ * @brief   mDNS cache PTR subtype structure
+ */
+typedef struct mdns_cache_subtype_s {
+    char *subtype;
+    uint32_t ttl;
+    bool pending_sync; /*!< true if the subtype needs sync notification */
+    struct mdns_cache_subtype_s *next;
+} mdns_cache_subtype_t;
+
+/**
+ * @brief   mDNS cache ADDR list structure
+ */
+typedef struct mdns_cache_addr_s {
+    esp_ip_addr_t addr;
+    uint32_t ttl;
+    struct mdns_cache_addr_s *next;
+} mdns_cache_addr_t;
+
+/**
+ * @brief   mDNS cache service structure, contains PTR (with subtype list), SRV and TXT records
+ */
+typedef struct mdns_service_cache_s {
+    char *instance_name;
+    char *service;
+    char *proto;
+    // PTR
+    bool ptr_present;   /*!< true if PTR record is present */
+    uint32_t ptr_ttl;
+    // Subtype list
+    mdns_cache_subtype_t *subtype_list;
+    // SRV
+    bool srv_present;   /*!< true if SRV record is present */
+    uint16_t priority;
+    uint16_t weight;
+    uint16_t port;
+    uint32_t srv_ttl;
+    // TXT
+    bool txt_present;   /*!< true if TXT record is present */
+    mdns_txt_linked_item_t *txt_list;
+    uint32_t txt_ttl;
+    // To-sync flags
+    mdns_cache_record_mask_t sync_records;      /*!< bitmask of records to sync, see @ref mdns_cache_record_type_t */
+    mdns_cache_consumer_mask_t sync_consumers;  /*!< bitmask of consumers to sync, see @ref mdns_cache_consumer_type_t */
+    struct mdns_service_cache_s *next;
+} mdns_service_cache_t;
+
+/**
+ * @brief   mDNS cache entry structure, contains hostname, IP address list and service cache list
+ */
+typedef struct mdns_cache_entry_s {
+    char *hostname;
+    esp_netif_t *esp_netif;
+    mdns_ip_protocol_t ip_protocol;
+
+    mdns_cache_addr_t *addr_list;
+    mdns_service_cache_t *service_cache_list;
+    struct mdns_cache_entry_s *next;
+} mdns_cache_entry_t;
+
+/**
+ * @brief   mDNS cache update result structure
+ */
+typedef enum {
+    MDNS_CACHE_NO_CHANGE,   /*!< no change to the cache */
+    MDNS_CACHE_ADDED,       /*!< new cache entry or service cache appended */
+    MDNS_CACHE_UPDATED,     /*!< existing service cache entry updated */
+    MDNS_CACHE_REMOVED,     /*!< existing service cache entry removed */
+    MDNS_CACHE_ERROR,       /*!< error occurred while updating the cache */
+} mdns_cache_update_result_t;

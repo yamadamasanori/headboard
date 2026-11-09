@@ -20,7 +20,7 @@
 | `main/board.h` | ボードごとの違い（GPIO の既定値、配布するファイル名など） |
 | `main/status_led.c`、`main/status_oled.c` | 状態表示（N16R8 のフルカラー LED、OLED）。表示する状態の判定は `main/status.c` で共通 |
 | `main/oled_font.c` | OLED 用のフォント（X11 misc-fixed、パブリックドメイン。`tools/gen_font.py` で作る） |
-| `components/mdns/` | mDNS（Espressif、Apache-2.0、mdns-v1.8.2 を同梱。`headboard-xxxxxx.local` の名前で本体を開くため） |
+| `components/mdns/` | mDNS（Espressif、Apache-2.0、mdns-v1.15.1 を同梱。`headboard-xxxxxx.local` の名前で本体を開くため） |
 | `partitions.csv` | フラッシュの区画（N16R8 用。ファームウェア 4MB × 2 の OTA 構成と、クラッシュの記録 256KB） |
 | `partitions_8mb.csv` | フラッシュ 8MB 用の区画（XIAO 用。ファームウェア 3.75MB × 2 と、クラッシュの記録 256KB） |
 | `components/microlink/` | Tailscale クライアント MicroLink（MIT、コミット 216da33 を同梱。認証失敗の検出、定期ログを減らす、tailnet 経由の TCP でクラッシュする不具合の修正と、本家で未マージの修正（スレッドの安全性、DERP の接続失敗時のメモリの解放、大きな転送での取りこぼしなど）を取り込んだ変更あり、`VERSION` 参照） |

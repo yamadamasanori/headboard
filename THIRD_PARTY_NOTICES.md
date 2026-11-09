@@ -112,7 +112,7 @@ Apache License 2.0 の全文は [web/vendor/esp-web-tools/LICENSE](web/vendor/es
 
 ## 4. mDNS（`components/mdns/`）
 
-- 配布元: https://github.com/espressif/esp-protocols （mdns-v1.8.2、コミット e9d7350219dfb5e39eb56e5ef60c094190888c55。テストとサンプルを除いて同梱、改変なし）
+- 配布元: https://github.com/espressif/esp-protocols （mdns-v1.15.1、コミット 587888b46aa6a6fd31d69144a6d36079b7adcbb0。テストとサンプルを除いて同梱、改変なし）
 - ライセンス: Apache License 2.0（全文は [components/mdns/LICENSE](components/mdns/LICENSE)）
 
 ```
