@@ -69,6 +69,8 @@ static void set_defaults(void)
     g_cfg.sled_always_on = false;
     g_cfg.pwm_freq = 5000;
     g_cfg.pwm_invert = false;
+    g_cfg.duty_min_reading = g_cfg.duty_min_backlight = 10;       // 0.1%
+    g_cfg.duty_max_reading = g_cfg.duty_max_backlight = 10000;    // 100%
     g_cfg.watt_reading = 1.0f;
     g_cfg.watt_backlight = 1.0f;
     g_cfg.ts_enabled = false;
@@ -186,6 +188,10 @@ void config_load(void)
     if (nvs_get_u8(h, "pwm_inv", &flag) == ESP_OK) {
         g_cfg.pwm_invert = flag != 0;
     }
+    nvs_get_u16(h, "dmin_read", &g_cfg.duty_min_reading);
+    nvs_get_u16(h, "dmax_read", &g_cfg.duty_max_reading);
+    nvs_get_u16(h, "dmin_back", &g_cfg.duty_min_backlight);
+    nvs_get_u16(h, "dmax_back", &g_cfg.duty_max_backlight);
     if (nvs_get_u8(h, "ts_en", &flag) == ESP_OK) {
         g_cfg.ts_enabled = flag != 0;
     }
@@ -247,6 +253,10 @@ esp_err_t config_save(void)
     NVS_SET(nvs_set_u8(h, "pin_back", g_cfg.pin_backlight));
     NVS_SET(nvs_set_u16(h, "pwm_freq", g_cfg.pwm_freq));
     NVS_SET(nvs_set_u8(h, "pwm_inv", g_cfg.pwm_invert ? 1 : 0));
+    NVS_SET(nvs_set_u16(h, "dmin_read", g_cfg.duty_min_reading));
+    NVS_SET(nvs_set_u16(h, "dmax_read", g_cfg.duty_max_reading));
+    NVS_SET(nvs_set_u16(h, "dmin_back", g_cfg.duty_min_backlight));
+    NVS_SET(nvs_set_u16(h, "dmax_back", g_cfg.duty_max_backlight));
     NVS_SET(nvs_set_u8(h, "ts_en", g_cfg.ts_enabled ? 1 : 0));
     NVS_SET(nvs_set_u8(h, "ts_only", g_cfg.tailnet_only ? 1 : 0));
     NVS_SET(nvs_set_str(h, "ts_key", g_cfg.ts_authkey));
@@ -338,6 +348,11 @@ void config_to_json(cJSON *o)
     cJSON_AddNumberToObject(o, "pin_backlight", g_cfg.pin_backlight);
     cJSON_AddNumberToObject(o, "pwm_freq", g_cfg.pwm_freq);
     cJSON_AddBoolToObject(o, "pwm_invert", g_cfg.pwm_invert);
+    // 0.01% 単位で持っているので、% にして返す
+    cJSON_AddNumberToObject(o, "duty_min_reading", g_cfg.duty_min_reading / 100.0);
+    cJSON_AddNumberToObject(o, "duty_max_reading", g_cfg.duty_max_reading / 100.0);
+    cJSON_AddNumberToObject(o, "duty_min_backlight", g_cfg.duty_min_backlight / 100.0);
+    cJSON_AddNumberToObject(o, "duty_max_backlight", g_cfg.duty_max_backlight / 100.0);
     cJSON_AddBoolToObject(o, "ts_enabled", g_cfg.ts_enabled);
     cJSON_AddBoolToObject(o, "tailnet_only", g_cfg.tailnet_only);
     cJSON_AddBoolToObject(o, "ts_authkey_set", g_cfg.ts_authkey[0] != 0);
@@ -448,6 +463,21 @@ static bool take_watt(const cJSON *o, const char *key, float *out, char *err, si
     return true;
 }
 
+// デューティ比 [%] を 0.01% 単位で受け取る
+static bool take_duty(const cJSON *o, const char *key, double min, double max, uint16_t *out, char *err, size_t err_len)
+{
+    const cJSON *v = cJSON_GetObjectItemCaseSensitive(o, key);
+    if (!v) {
+        return true;
+    }
+    if (!cJSON_IsNumber(v) || v->valuedouble < min || v->valuedouble > max) {
+        snprintf(err, err_len, "%s は %g〜%g %% で指定してください", key, min, max);
+        return false;
+    }
+    *out = (uint16_t)(v->valuedouble * 100.0 + 0.5);
+    return true;
+}
+
 // PEM の CA 証明書として読めるか（1 枚だけ、CA であること）
 static bool valid_ca_pem(const char *pem, char *err, size_t err_len)
 {
@@ -497,7 +527,15 @@ static bool apply_json(app_config_t *c, const cJSON *o, char *err, size_t err_le
         !take_int(o, "oled_scl", -1, 48, &scl, err, err_len) ||
         !take_int(o, "sled_brightness", 1, 255, &sb, err, err_len) ||
         !take_watt(o, "watt_reading", &c->watt_reading, err, err_len) ||
-        !take_watt(o, "watt_backlight", &c->watt_backlight, err, err_len)) {
+        !take_watt(o, "watt_backlight", &c->watt_backlight, err, err_len) ||
+        !take_duty(o, "duty_min_reading", 0.01, 50, &c->duty_min_reading, err, err_len) ||
+        !take_duty(o, "duty_max_reading", 1, 100, &c->duty_max_reading, err, err_len) ||
+        !take_duty(o, "duty_min_backlight", 0.01, 50, &c->duty_min_backlight, err, err_len) ||
+        !take_duty(o, "duty_max_backlight", 1, 100, &c->duty_max_backlight, err, err_len)) {
+        return false;
+    }
+    if (c->duty_min_reading >= c->duty_max_reading || c->duty_min_backlight >= c->duty_max_backlight) {
+        snprintf(err, err_len, "最小のデューティ比は、最大より小さくしてください");
         return false;
     }
     if (!valid_output_pin(pr) || !valid_output_pin(pb)) {

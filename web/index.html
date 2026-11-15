@@ -172,9 +172,14 @@
           <div><label for="pin_backlight">バックライトの GPIO</label><input id="pin_backlight" type="number" min="0" max="48"></div>
           <div><label for="watt_reading">読書灯の定格消費電力 [W]</label><input id="watt_reading" type="number" min="0" max="100" step="0.1"></div>
           <div><label for="watt_backlight">バックライトの定格消費電力 [W]</label><input id="watt_backlight" type="number" min="0" max="100" step="0.1"></div>
+          <div><label for="duty_min_reading">読書灯の最小デューティ比 [%]</label><input id="duty_min_reading" type="number" min="0.01" max="50" step="0.01"></div>
+          <div><label for="duty_max_reading">読書灯の最大デューティ比 [%]</label><input id="duty_max_reading" type="number" min="1" max="100" step="0.01"></div>
+          <div><label for="duty_min_backlight">バックライトの最小デューティ比 [%]</label><input id="duty_min_backlight" type="number" min="0.01" max="50" step="0.01"></div>
+          <div><label for="duty_max_backlight">バックライトの最大デューティ比 [%]</label><input id="duty_max_backlight" type="number" min="1" max="100" step="0.01"></div>
           <div><label><input id="pwm_invert" type="checkbox"> 出力を反転する（アクティブ Low の回路用）</label></div>
           <div><label><input id="log_verbose" type="checkbox"> 詳細ログを出す（Tailscale・Wi-Fi の途中経過。調査用）</label></div>
         </div>
+        <p class="note">明るさ 1 で最小、255 で最大のデューティ比になり、その間は 1 段ごとに同じ割合で明るくなります（既定 0.1〜100%）。暗いときにちらつくなら最小を上げ、明るい側で変化がなくなるなら最大を下げてください。</p>
       </fieldset>
       <fieldset>
         <legend><span class="board-led">状態表示（基板上のフルカラー LED・OLED ディスプレイ）</span><span class="board-oled" hidden>状態表示（OLED ディスプレイ SSD1306、128×64、I2C）</span></legend>
@@ -244,7 +249,7 @@
 const $ = (id) => document.getElementById(id);
 const textFields = ["wifi_ssid", "wifi_pass", "mqtt_host", "mqtt_user", "mqtt_pass", "mqtt_ca", "device_name", "ts_authkey", "ts_hostname"];
 const secretFields = ["wifi_pass", "mqtt_pass", "ts_authkey"];
-const numFields = ["mqtt_port", "pin_reading", "pin_backlight", "pwm_freq", "sled_pin", "sled_brightness", "oled_sda", "oled_scl", "watt_reading", "watt_backlight"];
+const numFields = ["mqtt_port", "pin_reading", "pin_backlight", "pwm_freq", "sled_pin", "sled_brightness", "oled_sda", "oled_scl", "watt_reading", "watt_backlight", "duty_min_reading", "duty_max_reading", "duty_min_backlight", "duty_max_backlight"];
 const indicatorNames = {
   starting: "起動中", wifi_unconfigured: "紫・Wi-Fi 未設定", ble_setup: "紫・Bluetooth で Wi-Fi の設定待ち", wifi_connecting: "青・Wi-Fi 接続中",
   tailscale_connecting: "水色・Tailscale 接続中", tailscale_auth_error: "赤・Tailscale 認証エラー",

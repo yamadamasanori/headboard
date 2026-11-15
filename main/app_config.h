@@ -6,7 +6,7 @@
 #include "cJSON.h"
 #include "esp_err.h"
 
-#define FW_VERSION "2.7.1"
+#define FW_VERSION "2.8.0"
 
 #define STATUS_LED_DISABLED 0xFF
 #define MQTT_CA_MAX 2560      // CA 証明書（PEM）の最大の長さ（終端を含む）。RSA 4096 bit の証明書まで入る
@@ -25,6 +25,11 @@ typedef struct {
     uint8_t pin_backlight;  // バックライトの GPIO
     uint16_t pwm_freq;      // PWM 周波数 [Hz]
     bool pwm_invert;        // 出力を反転（アクティブLowのドライバ用）
+    // 明るさ 1 と 255 のときのデューティ比 [0.01% 単位]。その間は対数で割り振る
+    uint16_t duty_min_reading;
+    uint16_t duty_max_reading;
+    uint16_t duty_min_backlight;
+    uint16_t duty_max_backlight;
     bool ts_enabled;        // Tailscale を使う
     bool tailnet_only;      // 本体の設定ページ（と更新）を tailnet からだけ受け付ける
     char ts_authkey[128];   // Tailscale の認証キー（tskey-auth-...）

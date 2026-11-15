@@ -9,6 +9,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "soc/soc_caps.h"
 #include "usage.h"
 
 static const char *TAG = "leds";
@@ -19,7 +20,6 @@ static const char *TAG = "leds";
 #define FADE_STEP_MS     10
 #define DEFAULT_FADE_MS  500
 #define MAX_FADE_MS      60000
-#define GAMMA            2.2f
 
 typedef struct {
     bool on;
@@ -54,19 +54,38 @@ int leds_find(const char *key)
 
 void leds_set_changed_cb(leds_changed_cb_t cb) { s_cb = cb; }
 
-// 人の目の感じ方に合わせて、明るさ(0〜255)をデューティ比に変換する
-static uint32_t level_to_duty(float level)
+// 明るさ 1・255 のときのデューティ比（0〜1）。設定がおかしいときは既定の 0.1%〜100% にする
+static void duty_range(light_id_t id, float *lo, float *hi)
+{
+    uint16_t mn = id == LIGHT_READING ? g_cfg.duty_min_reading : g_cfg.duty_min_backlight;
+    uint16_t mx = id == LIGHT_READING ? g_cfg.duty_max_reading : g_cfg.duty_max_backlight;
+    if (mn == 0 || mx > 10000 || mn >= mx) {
+        mn = 10;
+        mx = 10000;
+    }
+    *lo = mn / 10000.0f;
+    *hi = mx / 10000.0f;
+}
+
+// 明るさ(0〜255)をデューティ比に変換する。目は明るさを比率で感じるので、
+// 最小〜最大のデューティ比を対数で割り振り、1 段ごとに同じ割合で明るくする
+// （照明の調光規格 DALI の対数カーブと同じ考え方。既定の 0.1%〜100% なら 1 段で約 2.8%）
+static uint32_t level_to_duty(light_id_t id, float level)
 {
     if (level <= 0.0f) {
         return 0;
     }
-    uint32_t duty = (uint32_t)lroundf(powf(level / 255.0f, GAMMA) * s_max_duty);
+    float lo, hi;
+    duty_range(id, &lo, &hi);
+    // フェードの途中で 0〜1 の間を通るときは、最小のデューティ比へ直線でつなぐ
+    float ratio = level < 1.0f ? lo * level : lo * powf(hi / lo, (fminf(level, 255.0f) - 1.0f) / 254.0f);
+    uint32_t duty = (uint32_t)lroundf(ratio * s_max_duty);
     return duty == 0 ? 1 : duty;
 }
 
 static void write_duty(light_id_t id, float level)
 {
-    ledc_set_duty(LEDC_MODE, (ledc_channel_t)id, level_to_duty(level));
+    ledc_set_duty(LEDC_MODE, (ledc_channel_t)id, level_to_duty(id, level));
     ledc_update_duty(LEDC_MODE, (ledc_channel_t)id);
 }
 
@@ -92,7 +111,7 @@ static void fade_task(void *arg)
 
 static int duty_resolution_bits(uint32_t freq)
 {
-    int bits = 13;
+    int bits = SOC_LEDC_TIMER_BIT_WIDTH;  // ESP32-S3 は 14 bit まで
     while (bits > 8 && ((uint64_t)freq << bits) > LEDC_SRC_HZ) {
         bits--;
     }
@@ -130,8 +149,9 @@ void leds_init(void)
         };
         ESP_ERROR_CHECK(ledc_channel_config(&ch));
     }
-    ESP_LOGI(TAG, "PWM %u Hz, %d bit, reading=GPIO%u, backlight=GPIO%u%s",
-             g_cfg.pwm_freq, bits, g_cfg.pin_reading, g_cfg.pin_backlight,
+    ESP_LOGI(TAG, "PWM %u Hz, %d bit, reading=GPIO%u (%.2f-%.2f%%), backlight=GPIO%u (%.2f-%.2f%%)%s",
+             g_cfg.pwm_freq, bits, g_cfg.pin_reading, g_cfg.duty_min_reading / 100.0, g_cfg.duty_max_reading / 100.0,
+             g_cfg.pin_backlight, g_cfg.duty_min_backlight / 100.0, g_cfg.duty_max_backlight / 100.0,
              g_cfg.pwm_invert ? " (inverted)" : "");
 
     xTaskCreate(fade_task, "led_fade", 3072, NULL, 5, NULL);
@@ -216,7 +236,7 @@ float leds_output_ratio(light_id_t id)
     xSemaphoreTake(s_lock, portMAX_DELAY);
     float level = s_lights[id].level;
     xSemaphoreGive(s_lock);
-    return s_max_duty ? (float)level_to_duty(level) / s_max_duty : 0.0f;
+    return s_max_duty ? (float)level_to_duty(id, level) / s_max_duty : 0.0f;
 }
 
 void leds_get(light_id_t id, bool *on, uint8_t *brightness)
