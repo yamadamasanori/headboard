@@ -2,11 +2,15 @@
 
 #include <stdio.h>
 #include <string.h>
+#include "board.h"
 #include "commands.h"
 #include "driver/uart.h"
 #include "driver/uart_vfs.h"
 #include "driver/usb_serial_jtag.h"
 #include "esp_log.h"
+#include "esp_rom_gpio.h"
+#include "soc/gpio_sig_map.h"
+#include "soc/uart_periph.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -78,6 +82,7 @@ static void feed(line_buf_t *lb, const uint8_t *buf, int n)
     }
 }
 
+#if !BOARD_UART_RX_FREE
 static void uart_task(void *arg)
 {
     static line_buf_t lb;
@@ -88,6 +93,8 @@ static void uart_task(void *arg)
         feed(&lb, buf, n);
     }
 }
+
+#endif
 
 static void usb_task(void *arg)
 {
@@ -107,7 +114,17 @@ void console_start(void)
     // uart_task はすぐに USB にも hello を送るので、先に USB のドライバーを入れておく
     usb_serial_jtag_driver_config_t usj = {.rx_buffer_size = 1024, .tx_buffer_size = 2048};
     ESP_ERROR_CHECK(usb_serial_jtag_driver_install(&usj));
+#if BOARD_UART_RX_FREE
+    // RX（GPIO44）はライトに使うので、COM 端子からは受け取らない（TX のログ出力はそのまま）。
+    // RX の信号を常に High につなぎ、ピンの状態がゴミとして受信されないようにする
+    esp_rom_gpio_connect_in_signal(GPIO_MATRIX_CONST_ONE_INPUT,
+                                   UART_PERIPH_SIGNAL(CONSOLE_UART, SOC_UART_RX_PIN_IDX), false);
+    send_hello();
+    xTaskCreate(usb_task, "console_usb", 6144, NULL, 4, NULL);
+    ESP_LOGI(TAG, "setup console ready on USB (UART%d is log only)", CONSOLE_UART);
+#else
     xTaskCreate(uart_task, "console_uart", 6144, NULL, 4, NULL);
     xTaskCreate(usb_task, "console_usb", 6144, NULL, 4, NULL);
     ESP_LOGI(TAG, "setup console ready on UART%d and USB", CONSOLE_UART);
+#endif
 }

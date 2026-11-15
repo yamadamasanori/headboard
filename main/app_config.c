@@ -395,9 +395,14 @@ static bool valid_output_pin(int pin)
         return false;
     }
 #endif
-    if (pin == 19 || pin == 20 || pin == 43 || pin == 44) {  // USB 端子 / COM 端子
+    if (pin == 19 || pin == 20 || pin == 43) {  // USB 端子 / COM 端子の TX（ログ）
         return false;
     }
+#if !BOARD_UART_RX_FREE
+    if (pin == 44) {  // COM 端子の RX（設定用の入力）
+        return false;
+    }
+#endif
     return true;
 }
 

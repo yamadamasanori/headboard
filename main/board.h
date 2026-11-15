@@ -12,10 +12,13 @@
 #define BOARD_MODEL         "ESP32 Headboard LED (XIAO ESP32S3)"
 #define BOARD_STATUS_NAME   "画面"                  // Home Assistant での状態表示の呼び名
 #define BOARD_STATUS_ON     "表示"
-#define BOARD_PIN_READING   1   // D0
-#define BOARD_PIN_BACKLIGHT 2   // D1
-#define BOARD_OLED_SDA      5   // D4（XIAO の標準の I2C）
-#define BOARD_OLED_SCL      6   // D5
+// 専用基板の配線に合わせる。D7（GPIO44）は UART0 の RX だが、XIAO では COM 端子からの
+// 入力を使わない（console.c）ので、バックライトに使う
+#define BOARD_PIN_READING   7   // D8（LED1）
+#define BOARD_PIN_BACKLIGHT 44  // D7（LED2・LED3）
+#define BOARD_OLED_SDA      8   // D9
+#define BOARD_OLED_SCL      9   // D10
+#define BOARD_UART_RX_FREE  1   // GPIO44（UART0 RX）を出力に使ってよい
 #else
 // ESP32-S3 N16R8（DevKitC-1 互換）。状態表示は基板上のフルカラー LED（WS2812）
 #define BOARD_ID            "n16r8"
@@ -27,5 +30,6 @@
 #define BOARD_STATUS_ON     "点灯"
 #define BOARD_PIN_READING   4
 #define BOARD_PIN_BACKLIGHT 5
+#define BOARD_UART_RX_FREE  0   // GPIO44 は COM 端子の RX（設定用の入力）
 #define BOARD_SLED_PIN      48
 #endif
