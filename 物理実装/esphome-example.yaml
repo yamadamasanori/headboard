@@ -1,0 +1,51 @@
+# ESP32-S3 LED調光基板（XIAO ESP32S3 + OLED）ESPHome 設定例
+# wifi / api / ota などは環境に合わせて追記してください
+
+esp32:
+  board: seeed_xiao_esp32s3
+  framework:
+    type: esp-idf
+
+logger:
+  hardware_uart: USB_SERIAL_JTAG   # GPIO44(UART0 RX)をLEDに使うため
+
+i2c:
+  sda: GPIO5
+  scl: GPIO6
+
+output:
+  - platform: ledc
+    pin: GPIO9
+    id: led1_pwm
+    frequency: 1000Hz
+  - platform: ledc
+    pin: GPIO44
+    id: led2_pwm
+    frequency: 1000Hz
+
+light:
+  - platform: monochromatic
+    id: led1
+    name: "LED 1"
+    output: led1_pwm
+  - platform: monochromatic
+    id: led2
+    name: "LED 2-3"
+    output: led2_pwm
+
+font:
+  - file: "gfonts://Roboto"
+    id: font_s
+    size: 14
+
+display:
+  - platform: ssd1306_i2c
+    model: "SSD1306 128x64"
+    address: 0x3C
+    lambda: |-
+      auto pct = [](light::LightState *l) {
+        auto v = l->current_values;
+        return v.is_on() ? v.get_brightness() * 100.0f : 0.0f;
+      };
+      it.printf(0, 0, id(font_s), "LED1   %3.0f%%", pct(id(led1)));
+      it.printf(0, 20, id(font_s), "LED2-3 %3.0f%%", pct(id(led2)));

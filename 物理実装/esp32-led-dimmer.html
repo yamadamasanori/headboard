@@ -1,0 +1,512 @@
+<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ESP32-S3 LED調光基板</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans+JP:wght@400;500;700&display=swap">
+<style>
+/* Layout: 1カラムの作業手順書。基板図を主役に、回路図・部品表・配線表・設定を順に並べる */
+:root{
+  --bg:#f3f5f4; --surface:#ffffff; --fg:#1d2321; --muted:#5d6864; --line:#d5dbd8;
+  --accent:#1f6f5c; --board:#d9cf9f; --board-edge:#b9ad78; --hole:#8a7a3c; --pad:#c7a24a;
+  --body:#2c3330; --body-fg:#f2f2ee; --warn:#9a5b00;
+  --n-v12:#d23b2f; --n-gnd:#2f4f8f; --n-v5:#e07b00; --n-vdc5:#b8860b; --n-g13:#1e9a4b; --n-g14:#0b8f9c;
+  --n-gate1:#7a3fb8; --n-gate2:#b03f9a; --n-led1n:#6b4a2b; --n-led2n:#8c6d1f;
+  --f-sans:"IBM Plex Sans JP",system-ui,-apple-system,"Hiragino Sans",sans-serif;
+  --f-mono:"IBM Plex Mono",ui-monospace,Menlo,monospace;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#141917; --surface:#1c2220; --fg:#e6ebe8; --muted:#9aa6a1; --line:#33403b;
+  --accent:#5cc4a6; --board:#4a4428; --board-edge:#6a6238; --hole:#1a170c; --pad:#a88a3a;
+  --body:#0d100f; --body-fg:#e6ebe8; --warn:#e3a33b;
+  --n-v12:#ff6b5e; --n-gnd:#7f9fe8; --n-v5:#ffa040; --n-vdc5:#e6be4a; --n-g13:#4fd081; --n-g14:#3fd0de;
+  --n-gate1:#b58af0; --n-gate2:#ec7fd6; --n-led1n:#d9a372; --n-led2n:#e3c35a; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#141917; --surface:#1c2220; --fg:#e6ebe8; --muted:#9aa6a1; --line:#33403b;
+  --accent:#5cc4a6; --board:#4a4428; --board-edge:#6a6238; --hole:#1a170c; --pad:#a88a3a;
+  --body:#0d100f; --body-fg:#e6ebe8; --warn:#e3a33b;
+  --n-v12:#ff6b5e; --n-gnd:#7f9fe8; --n-v5:#ffa040; --n-vdc5:#e6be4a; --n-g13:#4fd081; --n-g14:#3fd0de;
+  --n-gate1:#b58af0; --n-gate2:#ec7fd6; --n-led1n:#d9a372; --n-led2n:#e3c35a; color-scheme:dark}
+body{background:var(--bg);color:var(--fg);font-family:var(--f-sans);font-size:15px;line-height:1.7}
+.wrap{max-width:980px;margin:0 auto;padding-block:28px 64px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));display:flex;flex-direction:column;gap:36px}
+header h1{font-size:1.7rem;line-height:1.3;margin:0 0 6px;text-wrap:balance;font-weight:700}
+header p{margin:0;color:var(--muted);max-width:68ch}
+.spec{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+.spec span{font-family:var(--f-mono);font-size:.8rem;border:1px solid var(--line);padding:2px 10px;border-radius:4px;background:var(--surface)}
+h2{font-size:1.15rem;margin:0 0 12px;display:flex;align-items:baseline;gap:10px}
+h2 small{font-weight:400;color:var(--muted);font-size:.85rem}
+section{min-width:0}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:16px;min-width:0}
+.toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.seg button{font:inherit;font-size:.85rem;border:0;background:transparent;color:var(--fg);padding:6px 14px;cursor:pointer}
+.seg button[aria-pressed="true"]{background:var(--accent);color:var(--surface)}
+.seg button:focus-visible,.chip:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chip{font:inherit;font-size:.78rem;display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);background:var(--surface);color:var(--fg);border-radius:999px;padding:2px 10px 2px 6px;cursor:pointer}
+.chip i{width:14px;height:4px;border-radius:2px;display:inline-block}
+.chip[aria-pressed="true"]{border-color:var(--fg);font-weight:600}
+.scroll{overflow-x:auto}
+svg text{font-family:var(--f-mono)}
+.note{font-size:.85rem;color:var(--muted);margin:10px 0 0}
+table{border-collapse:collapse;width:100%;font-size:.88rem}
+th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-weight:600;color:var(--muted);font-size:.8rem;letter-spacing:.04em}
+td.mono,.mono{font-family:var(--f-mono);font-variant-numeric:tabular-nums}
+.netdot{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px;vertical-align:-1px}
+pre{font-family:var(--f-mono);font-size:.82rem;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:12px 14px;overflow-x:auto;margin:0;line-height:1.55}
+ul.checks{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:6px;max-width:72ch}
+.steps{margin:0;padding-left:1.4em;display:flex;flex-direction:column;gap:8px;max-width:78ch}
+.steps li::marker{font-family:var(--f-mono);font-weight:600;color:var(--accent)}
+.sub{font-size:.88rem;color:var(--muted)}
+h3{font-size:1rem;margin:20px 0 8px}
+.tag{display:inline-block;font-size:.75rem;border:1px solid var(--line);border-radius:4px;padding:0 6px;margin-right:4px;white-space:nowrap}
+.warn{color:var(--warn);font-weight:600}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media (max-width:720px){.grid2{grid-template-columns:1fr}}
+.hl-dim .wire:not(.on){opacity:.12}
+.hl-dim .pinmark:not(.on){opacity:.25}
+</style>
+
+<div class="wrap">
+<header>
+  <h1>ESP32-S3 LED調光基板</h1>
+  <p>Seeed Studio XIAO ESP32S3 で 12V 3W LED 3個を2系統 PWM 調光し、0.96インチ OLED（GME12864-52）に状態を表示する、ユニバーサル基板の配線図です。12V ACアダプタ1本で動き、5Vは基板上の降圧DCDCで作ります。</p>
+  <div class="spec"><span>入力 DC12V</span><span>LED 12V 3W ×3</span><span>GPIO9 → LED1</span><span>GPIO44 → LED2・LED3（並列）</span><span>OLED I2C：SDA GPIO5／SCL GPIO6</span><span>基板 72×47mm・穴 25×15（四隅は取付穴）</span></div>
+</header>
+
+<section>
+  <h2>基板図 <small>2.54mmピッチ／列A–Y・行1–15</small></h2>
+  <div class="panel">
+    <div class="toolbar">
+      <div class="seg" role="group" aria-label="表示面">
+        <button id="v-comp" aria-pressed="true">部品面（表）</button>
+        <button id="v-sold" aria-pressed="false">ハンダ面（裏）</button>
+      </div>
+      <div class="chips" id="chips"></div>
+    </div>
+    <div class="scroll"><svg id="board" role="img" aria-label="ユニバーサル基板の配線図"></svg></div>
+    <p class="note" id="viewnote"></p>
+  </div>
+</section>
+
+<section>
+  <h2>回路図</h2>
+  <div class="panel scroll">
+    <svg viewBox="0 0 1000 420" width="1000" height="420" role="img" aria-label="回路図" id="sch"></svg>
+  </div>
+</section>
+
+<section class="grid2">
+  <div>
+    <h2>部品表</h2>
+    <div class="panel scroll"><table id="bom"><thead><tr><th>記号</th><th>部品</th><th>数</th></tr></thead><tbody></tbody></table></div>
+  </div>
+  <div>
+    <h2>XIAO側の接続 <small>USB-C を基板右端に向けて実装</small></h2>
+    <div class="panel scroll"><table>
+      <thead><tr><th>ピン</th><th>GPIO</th><th>接続先</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">5V</td><td>—</td><td>D1カソード（DCDC出力から）</td></tr>
+        <tr><td class="mono">GND</td><td>—</td><td>GNDバス、OLED GND</td></tr>
+        <tr><td class="mono">3V3</td><td>—</td><td>OLED VCC</td></tr>
+        <tr><td class="mono">D4</td><td class="mono">GPIO5</td><td>OLED SDA</td></tr>
+        <tr><td class="mono">D5</td><td class="mono">GPIO6</td><td>OLED SCL</td></tr>
+        <tr><td class="mono">D10</td><td class="mono">GPIO9</td><td>R1 100Ω → Q1ゲート（LED1）</td></tr>
+        <tr><td class="mono">D7</td><td class="mono">GPIO44</td><td>R2 100Ω → Q2ゲート（LED2・LED3）</td></tr>
+        <tr><td class="mono">その他</td><td>—</td><td>未接続</td></tr>
+      </tbody></table>
+      <p class="note">I2C は XIAO 標準の D4（SDA）・D5（SCL）です。D4・D5・5V・3V3 は XIAO の下をくぐって左の OLED と D1 へ並んで伸び、D7・D10 は真下の R2・R1 へ、GND は真下の GND バスへ下ります。D7（GPIO44）は UART0 の RX と兼用ですが、ESPHome のログは USB 経由なので LED 用に使えます。</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>組み立ての順番</h2>
+  <div class="panel">
+    <h3 style="margin-top:0">配線の基本</h3>
+    <ul class="checks">
+      <li><strong>曲がり角は切らずに1本で曲げる</strong>：一端をはんだ付けし、穴に沿わせて押さえ、角の穴の上でラジオペンチかピンセットで 90° に曲げて、その角をすぐはんだ付けします。線は少し長めに始め、最後に余りを切ります。</li>
+      <li><strong>枝分かれは T 字に重ねる</strong>：幹の線を先に通し、枝の線の端を分岐点の穴の上で幹に重ねてはんだ付けします。</li>
+      <li><strong>はんだは要所だけ</strong>：部品のピン、曲がり角、分岐点、長い直線の途中 3〜4 穴おき。</li>
+      <li><strong>短い接続は部品の足で</strong>：抵抗とコンデンサの足は切らずに残し、配線表で「足」とある接続に使います。</li>
+      <li><strong>並走する線に注意</strong>：2〜5 行目は XIAO から OLED・D1 へ 4 本が 1 穴間隔で並びます。線を基板に密着させて張り、はんだが隣へ流れないようにします。</li>
+      <li><strong>ジャンパー線は 1 本だけ</strong>：+12V を U1 へ渡す N10→N8 の 1 本は、GND バスをまたぐため部品面側に付けます（スズメッキ線をコの字に曲げて差し込む）。</li>
+    </ul>
+    <h3>部品を付ける順番（背の低いものから）</h3>
+    <ol class="steps">
+      <li>D1（帯が上側 J4）、R1〜R4（寝かせて 3 ピッチ間隔）、C2（OLED の下。後からは入らない）。抵抗とコンデンサの足は切らずに残す。</li>
+      <li>部品面のジャンパー線（N10→N8）。</li>
+      <li>Q1、Q2（型番面から見て G・D・S。Q2 は左右逆向き）、C1。</li>
+      <li>XIAO 用ピンソケット 1×7 ×2、OLED 用ピンソケット 1×4。<span class="sub">XIAO を挿した状態ではんだ付けすると、2 本の間隔がずれません。</span></li>
+      <li>U1（ピンを横一列に）、TB2、TB3、J2（差込口を下端へ）。</li>
+      <li>裏面を下の配線表の順に配線。</li>
+      <li>XIAO と OLED を挿す前に、テスターで +12V–GND 間と 5V–GND 間がショートしていないことを確認。</li>
+    </ol>
+  </div>
+</section>
+
+<section>
+  <h2>配線表 <small>この順に配線。座標は部品面から見た列記号＋行番号</small></h2>
+  <div class="panel scroll"><table id="wires"><thead><tr><th>順</th><th>ネット</th><th>経路</th><th>方法</th><th>つながるもの</th></tr></thead><tbody></tbody></table>
+  <p class="note" id="wirenote"></p></div>
+</section>
+
+<section class="grid2">
+  <div>
+    <h2>ESPHome 設定例</h2>
+<pre>esp32:
+  board: seeed_xiao_esp32s3
+  framework:
+    type: esp-idf
+
+logger:
+  hardware_uart: USB_SERIAL_JTAG   # GPIO44(UART0 RX)をLEDに使うため
+
+i2c:
+  sda: GPIO5
+  scl: GPIO6
+
+output:
+  - platform: ledc
+    pin: GPIO9
+    id: led1_pwm
+    frequency: 1000Hz
+  - platform: ledc
+    pin: GPIO44
+    id: led2_pwm
+    frequency: 1000Hz
+
+light:
+  - platform: monochromatic
+    id: led1
+    name: "LED 1"
+    output: led1_pwm
+  - platform: monochromatic
+    id: led2
+    name: "LED 2-3"
+    output: led2_pwm
+
+font:
+  - file: "gfonts://Roboto"
+    id: font_s
+    size: 14
+
+display:
+  - platform: ssd1306_i2c
+    model: "SSD1306 128x64"
+    address: 0x3C
+    lambda: |-
+      auto pct = [](light::LightState *l) {
+        auto v = l->current_values;
+        return v.is_on() ? v.get_brightness() * 100.0f : 0.0f;
+      };
+      it.printf(0, 0, id(font_s), "LED1   %3.0f%%", pct(id(led1)));
+      it.printf(0, 20, id(font_s), "LED2-3 %3.0f%%", pct(id(led2)));</pre>
+  </div>
+  <div>
+    <h2>製作前の確認</h2>
+    <div class="panel">
+    <ul class="checks">
+      <li><span class="warn">OLEDのピン順</span>：図は左から GND・VCC・SCL・SDA。VCC・GND が逆の製品もあるので、シルク表示を確認してください。</li>
+      <li><strong>J2（DCジャックDIP化キット 完成品、秋月 114610）</strong>：15.24mm 角の基板に 4 本×2 列（列間隔 12.7mm）。差込口を基板の下端に向け、上の 4 本が＋、下の 4 本が−です。配線するのは＋の右端（M10）と−の左端（J15）だけで、残りは固定用にはんだ付けします。挿す前にテスターで＋同士・−同士がつながっていることを確認してください。</li>
+      <li><span class="warn">基板からのはみ出し</span>：ご指定の位置（左へ3・上へ3ピッチ）では、OLED（27.3×27.8mm）の左端が基板の左端から約4mm はみ出します。ほかの部品は基板の外形内（穴の外側の余白を含む）に収まります。</li>
+      <li><strong>四隅の取付穴</strong>：右上は XIAO、左下は OLED の下になります。どちらもソケットで浮かせるので、なべネジの頭なら当たりません。</li>
+      <li><strong>OLEDの実装</strong>：1×4 のピンソケット（高さ8.5mm）に挿して浮かせます。下に入るのは C2（背の低い部品）と配線だけです。</li>
+      <li><strong>抵抗</strong>：R1〜R4 は寝かせて 3 ピッチ（7.62mm）間隔で縦に並べます。1 ピッチ間隔で 4 本並ぶので、胴体の太い抵抗だと当たります。直径 2.5mm 以下の 1/4W 小型品を使うか、少しずらして付けてください。R1・R2 は GND バス（9行目）をまたぎます。</li>
+      <li><strong>D1</strong>：3V3 の線（5行目）をまたぐ位置です。</li>
+      <li><strong>Q1/Q2 と端子台</strong>：MOSFET の本体と端子台の本体がほぼ接する配置です。端子台の奥行き12.9mmは、ピン列を中心とした±約2.5穴として図示しています。ピンが本体の片側に寄っている場合は、端子台の向きを MOSFET から離れる側にしてください。</li>
+      <li><strong>D1（1N5819）</strong>：XIAO の 5V ピンから電源を入れるときはダイオードを入れるよう Seeed が指定しています。USB 書き込み中に12Vを挿したままでも逆流しません。</li>
+      <li><strong>2SK4017</strong>：型番面から見て G・D・S。<strong>M78AR05-1</strong>：1=+Vin、2=GND、3=+Vout。</li>
+      <li><strong>端子台（WJ141V 2.54mm）</strong>：推奨穴径1.2mm。基板の穴に入らなければ広げてください。</li>
+      <li><strong>LEDとACアダプタ</strong>：LED は12V用（電流制限入り）が前提です。ACアダプタは 12V 2A 以上、2.1mm センタープラス。</li>
+    </ul>
+    </div>
+  </div>
+</section>
+</div>
+
+<script id="data" type="application/json">
+{
+ "cols":25,"rows":15,
+ "missing":[[1,1],[25,1],[1,15],[25,15]],
+ "outline":[-1.17,-1.25,27.17,17.25],
+ "nets":{
+  "V12":{"name":"+12V","color":"--n-v12"},
+  "GND":{"name":"GND","color":"--n-gnd"},
+  "V5":{"name":"5V（XIAO）","color":"--n-v5"},
+  "VDC5":{"name":"DCDC出力","color":"--n-vdc5"},
+  "V33":{"name":"3V3","color":"--n-led2n"},
+  "SDA":{"name":"SDA GPIO5","color":"--n-g14"},
+  "SCL":{"name":"SCL GPIO6","color":"--n-gate2"},
+  "G9":{"name":"GPIO9","color":"--n-g13"},
+  "G44":{"name":"GPIO44","color":"--n-g13"},
+  "GATE1":{"name":"Q1ゲート","color":"--n-gate1"},
+  "GATE2":{"name":"Q2ゲート","color":"--n-gate1"},
+  "LED1N":{"name":"LED1 −","color":"--n-led1n"},
+  "LED2N":{"name":"LED2・3 −","color":"--n-led1n"}
+ },
+ "parts":[
+  {"ref":"U3","type":"xiao","val":"XIAO ESP32S3","body":[16.87,0.5,25.13,7.5],"pins":[
+    {"p":"D6","x":18,"y":1,"net":null},{"p":"D5","x":19,"y":1,"net":"SCL"},{"p":"D4","x":20,"y":1,"net":"SDA"},{"p":"D3","x":21,"y":1,"net":null},
+    {"p":"D2","x":22,"y":1,"net":null},{"p":"D1","x":23,"y":1,"net":null},{"p":"D0","x":24,"y":1,"net":null},
+    {"p":"D7","x":18,"y":7,"net":"G44"},{"p":"D8","x":19,"y":7,"net":null},{"p":"D9","x":20,"y":7,"net":null},{"p":"D10","x":21,"y":7,"net":"G9"},
+    {"p":"3V3","x":22,"y":7,"net":"V33"},{"p":"GND","x":23,"y":7,"net":"GND"},{"p":"5V","x":24,"y":7,"net":"V5"}]},
+  {"ref":"U2","type":"oled","val":"GME12864-52","raised":true,"body":[-2.88,3.5,7.87,14.44],"pins":[
+    {"p":"GND","x":1,"y":4,"net":"GND"},{"p":"VCC","x":2,"y":4,"net":"V33"},{"p":"SCL","x":3,"y":4,"net":"SCL"},{"p":"SDA","x":4,"y":4,"net":"SDA"}]},
+  {"ref":"J2","type":"jack","val":"DCジャック","body":[8.5,9.5,14.5,15.5],"pins":[
+    {"p":"+","x":10,"y":10,"net":null},{"p":"+","x":11,"y":10,"net":null},{"p":"+","x":12,"y":10,"net":null},{"p":"+","x":13,"y":10,"net":"V12"},
+    {"p":"−","x":10,"y":15,"net":"GND"},{"p":"−","x":11,"y":15,"net":null},{"p":"−","x":12,"y":15,"net":null},{"p":"−","x":13,"y":15,"net":null}]},
+  {"ref":"U1","type":"sip","val":"M78AR05-1","body":[10.7,4.5,15.3,7.5],"pins":[
+    {"p":"3","x":12,"y":6,"net":"VDC5"},{"p":"2","x":13,"y":6,"net":"GND"},{"p":"1","x":14,"y":6,"net":"V12"}]},
+  {"ref":"D1","type":"diode","val":"1N5819","body":[9.6,4.6,10.4,7.4],"low":true,"pins":[{"p":"K","x":10,"y":4,"net":"V5"},{"p":"A","x":10,"y":8,"net":"VDC5"}]},
+  {"ref":"C2","type":"ccap","val":"22µF","body":[6.8,7.3,9.2,8.7],"low":true,"pins":[{"p":"2","x":7,"y":8,"net":"GND"},{"p":"1","x":9,"y":8,"net":"VDC5"}]},
+  {"ref":"C1","type":"ccap","val":"22µF 25V","body":[23.3,12.3,24.7,13.7],"low":true,"pins":[{"p":"−","x":24,"y":12,"net":"GND"},{"p":"+","x":24,"y":14,"net":"V12"}]},
+  {"ref":"R1","type":"res","val":"100Ω","body":[20.55,8.6,21.45,10.4],"low":true,"pins":[{"p":"1","x":21,"y":8,"net":"G9"},{"p":"2","x":21,"y":11,"net":"GATE1"}]},
+  {"ref":"R3","type":"res","val":"100kΩ","body":[19.55,8.6,20.45,10.4],"low":true,"pins":[{"p":"1","x":20,"y":8,"net":"GND"},{"p":"2","x":20,"y":11,"net":"GATE1"}]},
+  {"ref":"R2","type":"res","val":"100Ω","body":[17.55,8.6,18.45,10.4],"low":true,"pins":[{"p":"1","x":18,"y":8,"net":"G44"},{"p":"2","x":18,"y":11,"net":"GATE2"}]},
+  {"ref":"R4","type":"res","val":"100kΩ","body":[18.55,8.6,19.45,10.4],"low":true,"pins":[{"p":"1","x":19,"y":8,"net":"GND"},{"p":"2","x":19,"y":11,"net":"GATE2"}]},
+  {"ref":"Q1","type":"fet","val":"2SK4017","body":[21.7,10.55,24.3,11.45],"pins":[{"p":"G","x":22,"y":11,"net":"GATE1"},{"p":"D","x":23,"y":11,"net":"LED1N"},{"p":"S","x":24,"y":11,"net":"GND"}]},
+  {"ref":"Q2","type":"fet","val":"2SK4017","body":[14.7,10.55,17.3,11.45],"pins":[{"p":"S","x":15,"y":11,"net":"GND"},{"p":"D","x":16,"y":11,"net":"LED2N"},{"p":"G","x":17,"y":11,"net":"GATE2"}]},
+  {"ref":"TB3","type":"tb","val":"LED2・3","body":[15,11.5,20,16.5],"pins":[{"p":"+","x":16,"y":14,"net":"V12"},{"p":"−","x":17,"y":14,"net":"LED2N"},{"p":"−","x":18,"y":14,"net":"LED2N"},{"p":"+","x":19,"y":14,"net":"V12"}]},
+  {"ref":"TB2","type":"tb","val":"LED1","body":[20,11.5,23,16.5],"pins":[{"p":"+","x":21,"y":14,"net":"V12"},{"p":"−","x":22,"y":14,"net":"LED1N"}]}
+ ],
+ "wires":[
+  {"net":"GND","how":"線","pts":[[1,4],[1,9],[24,9]],"to":"OLED GND → GNDバス（9行目）。R3・R4・U1 GND もこの線へ"},
+  {"net":"GND","how":"線","pts":[[23,7],[23,9]],"to":"XIAO GND → バス"},
+  {"net":"GND","how":"線","pts":[[24,11],[24,9]],"to":"Q1 S → バス"},
+  {"net":"GND","how":"線","pts":[[15,11],[15,9]],"to":"Q2 S → バス"},
+  {"net":"GND","how":"線","pts":[[10,15],[9,15],[9,9]],"to":"J2 − → バス"},
+  {"net":"GND","how":"線","pts":[[13,6],[13,9]],"to":"U1 GND → バス"},
+  {"net":"GND","how":"足","pts":[[20,8],[20,9]],"to":"R3 の足 → バス"},
+  {"net":"GND","how":"足","pts":[[19,8],[19,9]],"to":"R4 の足 → バス"},
+  {"net":"GND","how":"足","pts":[[7,8],[7,9]],"to":"C2 の足 → バス"},
+  {"net":"GND","how":"足","pts":[[24,12],[24,11]],"to":"C1 の足 → Q1 S"},
+  {"net":"V12","how":"線","pts":[[13,10],[14,10],[14,15],[24,15]],"to":"J2 + → +12Vバス（15行目）"},
+  {"net":"V12","how":"ジャンパー","pts":[[14,10],[14,8]],"to":"部品面のジャンパー線。GNDバス（N9）をまたぐ"},
+  {"net":"V12","how":"線","pts":[[14,8],[14,6]],"to":"→ U1 Vin"},
+  {"net":"V12","how":"線","pts":[[16,14],[16,15]],"to":"TB3+（LED2）→ バス"},
+  {"net":"V12","how":"線","pts":[[19,14],[19,15]],"to":"TB3+（LED3）→ バス"},
+  {"net":"V12","how":"線","pts":[[21,14],[21,15]],"to":"TB2+ → バス"},
+  {"net":"V12","how":"足","pts":[[24,14],[24,15]],"to":"C1 の足 → バス"},
+  {"net":"VDC5","how":"線","pts":[[12,6],[11,6],[11,8],[10,8]],"to":"U1 Vout → D1(A)"},
+  {"net":"VDC5","how":"足","pts":[[9,8],[10,8]],"to":"C2 の足 → D1(A)"},
+  {"net":"V5","how":"線","pts":[[24,7],[24,4],[10,4]],"to":"XIAO 5V → D1(K)（XIAOの下を通る）"},
+  {"net":"V33","how":"線","pts":[[22,7],[22,5],[2,5],[2,4]],"to":"XIAO 3V3 → OLED VCC（D1の下をくぐる）"},
+  {"net":"SCL","how":"線","pts":[[19,1],[19,2],[3,2],[3,4]],"to":"XIAO D5 → OLED SCL"},
+  {"net":"SDA","how":"線","pts":[[20,1],[20,3],[4,3],[4,4]],"to":"XIAO D4 → OLED SDA"},
+  {"net":"G44","how":"足","pts":[[18,7],[18,8]],"to":"XIAO D7 → R2"},
+  {"net":"G9","how":"足","pts":[[21,7],[21,8]],"to":"XIAO D10 → R1"},
+  {"net":"GATE1","how":"足","pts":[[21,11],[22,11]],"to":"R1 → Q1 G"},
+  {"net":"GATE1","how":"足","pts":[[20,11],[21,11]],"to":"R3 → Q1 G"},
+  {"net":"GATE2","how":"足","pts":[[18,11],[17,11]],"to":"R2 → Q2 G"},
+  {"net":"GATE2","how":"足","pts":[[19,11],[18,11]],"to":"R4 → Q2 G"},
+  {"net":"LED1N","how":"線","pts":[[23,11],[23,12],[22,12],[22,14]],"to":"Q1 D → TB2−"},
+  {"net":"LED2N","how":"線","pts":[[16,11],[16,12],[17,12],[17,14],[18,14]],"to":"Q2 D → TB3の−2本"}
+ ]
+}
+</script>
+
+<script>
+(function(){
+const D = JSON.parse(document.getElementById('data').textContent);
+const netColor = k => `var(${D.nets[k].color})`;
+const COL = i => String.fromCharCode(64+i);
+const O = D.outline, P = 26, M = 30, TOP = P*2.0, EX = P*2.0;
+const miss = new Set(D.missing.map(a=>a.join(',')));
+let solder = false, focus = null;
+const svg = document.getElementById('board');
+const W = M*2 + 2*EX + (D.cols+1)*P, H = TOP + (O[3]+1.4)*P + M*0.5;
+svg.setAttribute('viewBox',`0 0 ${W} ${H}`); svg.setAttribute('width',W); svg.setAttribute('height',H);
+const X = x => M + EX + (solder ? (D.cols+1-x) : x)*P;
+const Y = y => TOP + y*P;
+const el = (t,a,parent)=>{const e=document.createElementNS('http://www.w3.org/2000/svg',t);for(const k in a)e.setAttribute(k,a[k]);(parent||svg).appendChild(e);return e;};
+const txt = (s,x,y,a,parent)=>{const e=el('text',Object.assign({x,y,'font-size':10,fill:'var(--fg)','text-anchor':'middle','dominant-baseline':'middle'},a),parent);e.textContent=s;return e;};
+const box = (b)=>{ const xa=X(b[0]),xb=X(b[2]); return {x:Math.min(xa,xb),y:Y(b[1]),w:Math.abs(xb-xa),h:Y(b[3])-Y(b[1]),cx:(xa+xb)/2,cy:(Y(b[1])+Y(b[3]))/2}; };
+function label(s,x,y,g,extra){ return txt(s,x,y,Object.assign({'font-size':9.5,'font-weight':600,fill:'var(--fg)',stroke:'var(--board)','stroke-width':3,'paint-order':'stroke'},extra||{}),g); }
+
+function draw(){
+  svg.innerHTML=''; svg.classList.toggle('hl-dim', !!focus);
+  const bx = box(O);
+  el('rect',{x:bx.x,y:bx.y,width:bx.w,height:bx.h,rx:6,fill:'var(--board)',stroke:'var(--board-edge)','stroke-width':2});
+  for(let c=1;c<=D.cols;c++) txt(COL(c),X(c),Y(O[3])+P*0.6,{fill:'var(--muted)','font-size':9});
+  for(let r=1;r<=D.rows;r++) txt(r,X(O[0])-P*0.55,Y(r),{fill:'var(--muted)','font-size':9});
+  for(let c=1;c<=D.cols;c++)for(let r=1;r<=D.rows;r++){
+    if(miss.has(c+','+r)){ el('circle',{cx:X(c),cy:Y(r),r:P*0.62,fill:'var(--bg)',stroke:'var(--board-edge)','stroke-width':1.5}); continue; }
+    el('circle',{cx:X(c),cy:Y(r),r:5.2,fill:'var(--pad)',opacity: solder?0.9:0.55});
+    el('circle',{cx:X(c),cy:Y(r),r:2.4,fill:'var(--hole)'});
+  }
+  const partsG = el('g',{opacity: solder?0.3:1});
+  const wiresG = el('g',{});
+  if(solder){ drawWires(wiresG,false); svg.appendChild(partsG); drawParts(partsG); }
+  else { drawParts(partsG,'low'); drawWires(wiresG,true); const top=el('g',{}); drawParts(top,'high'); }
+  D.parts.forEach(p=>p.pins.forEach(q=>{ if(!q.net) return;
+    el('circle',{class:'pinmark'+(focus===q.net?' on':''),cx:X(q.x),cy:Y(q.y),r:3.6,fill:netColor(q.net),stroke:'var(--surface)','stroke-width':1});
+  }));
+  document.getElementById('viewnote').textContent = solder
+    ? 'ハンダ面（裏から見た状態・左右反転）。線はスズメッキ線でハンダ付けする配線です。列記号も反転しています。'
+    : '部品面（表）。外枠が基板の外形（72×47mm）、四隅の丸は取付穴です。裏面の配線は半透明で透かしています。点線の枠はソケットで浮かせる XIAO と OLED です。灰色の太線は部品面に付けるジャンパー線（1本）です。';
+}
+
+function drawWires(g,ghost){
+  D.wires.forEach(w=>{
+    const d = w.pts.map((p,i)=>(i?'L':'M')+X(p[0])+' '+Y(p[1])).join(' ');
+    if(w.how==='ジャンパー'){ if(ghost) el('path',{d,fill:'none',stroke:'#8d9592','stroke-width':6,'stroke-linecap':'round'},g); el('path',{class:'wire'+(focus===w.net?' on':''),d,fill:'none',stroke:netColor(w.net),'stroke-width':2.5,'stroke-linecap':'round',opacity:ghost?1:0.45,'stroke-dasharray':ghost?'':'2 3'},g); return; }
+    el('path',{class:'wire'+(focus===w.net?' on':''),d,fill:'none',stroke:netColor(w.net),'stroke-width':ghost?3:4.2,'stroke-linecap':'round','stroke-linejoin':'round',opacity:ghost?0.6:1,'stroke-dasharray':w.how==='足'?(ghost?'4 3':'7 4'):''},g);
+  });
+}
+
+function drawParts(g,layer){
+  D.parts.forEach(p=>{
+    const isHigh = p.type==='xiao'||p.type==='oled';
+    if(layer==='low' && isHigh) return;
+    if(layer==='high' && !isHigh) return;
+    const b = box(p.body), ps=p.pins;
+    const dark={fill:'var(--body)',stroke:'var(--body)'};
+    const fx = v => solder ? -v : v;
+    switch(p.type){
+      case 'xiao': {
+        el('rect',{x:b.x,y:b.y,width:b.w,height:b.h,rx:5,fill:'var(--accent)','fill-opacity':.08,stroke:'var(--accent)','stroke-width':2,'stroke-dasharray':'6 4'},g);
+        const u=box([24.4,2.9,25.75,5.1]); el('rect',{x:u.x,y:u.y,width:u.w,height:u.h,rx:3,fill:'#9aa3a0',stroke:'#5c6461'},g); label('USB-C',u.cx,u.cy+P*1.45,g,{'font-size':8.5});
+        ps.forEach(q=>{ el('rect',{x:X(q.x)-6,y:Y(q.y)-6,width:12,height:12,fill:'none',stroke:'var(--accent)','stroke-width':1.2},g);
+          label(q.p,X(q.x),Y(q.y)+(q.y===1?P*0.62:-P*0.62),g,{'font-size':7.5,'font-weight':500}); });
+        label('U3 XIAO ESP32S3',b.cx-fx(P*0.4),Y(3.5),g,{'font-size':10.5});
+        label('ソケット 1×7 ×2',b.cx-fx(P*0.4),Y(4.1),g,{'font-size':8.5,'font-weight':400});
+        break;}
+      case 'oled': {
+        el('rect',{x:b.x,y:b.y,width:b.w,height:b.h,rx:4,fill:'#1d3a5f','fill-opacity':.12,stroke:'#2f6fb0','stroke-width':2,'stroke-dasharray':'6 4'},g);
+        const a=box([-2.0,6.4,7.0,12.4]); el('rect',{x:a.x,y:a.y,width:a.w,height:a.h,fill:'none',stroke:'#2f6fb0','stroke-width':1,'stroke-dasharray':'2 3'},g);
+        label('表示部',a.cx,a.cy-P*0.8,g,{'font-size':9,fill:'#2f6fb0'});
+        label('U2 OLED GME12864-52',a.cx,a.cy+P*0.1,g,{'font-size':10});
+        label('ソケット 1×4 で浮かせる',a.cx,a.cy+P*0.75,g,{'font-size':8.5,'font-weight':400});
+        ps.forEach(q=>{ el('rect',{x:X(q.x)-6,y:Y(q.y)-6,width:12,height:12,fill:'none',stroke:'#2f6fb0','stroke-width':1.2},g);
+          label(q.p,X(q.x),Y(q.y)+P*0.62,g,{'font-size':7.5,'font-weight':500}); });
+        break;}
+      case 'jack': {
+        el('rect',{x:b.x,y:b.y,width:b.w,height:b.h,rx:3,fill:'#2f5f8f',stroke:'#1d3d5f',opacity:.85},g);
+        const j=box([9.73,9.6,13.27,15.4]); el('rect',{x:j.x,y:j.y,width:j.w,height:j.h,rx:4,fill:'#1d2321'},g);
+        el('circle',{cx:j.cx,cy:Y(14.9),r:P*0.4,fill:'#5c6461'},g);
+        ps.forEach(q=>txt(q.p,X(q.x),Y(q.y)+(q.y===10?P*0.55:-P*0.55),{'font-size':9,'font-weight':600,fill:'#f2f2ee'},g));
+        txt('J2',j.cx,Y(12.6),{'font-size':10,'font-weight':600,fill:'#f2f2ee'},g); txt('差込口↓',j.cx,Y(13.6),{'font-size':8,fill:'#f2f2ee'},g);
+        break;}
+      case 'sip':
+        el('rect',{x:b.x,y:b.y,width:b.w,height:b.h,rx:2,...dark},g);
+        ps.forEach(q=>txt(q.p,X(q.x),Y(q.y)-P*0.55,{'font-size':8,fill:'var(--body-fg)'},g));
+        txt('U1 M78AR05-1',b.cx,Y(7.0),{'font-size':8,fill:'var(--body-fg)','font-weight':600},g);
+        break;
+      case 'res':
+        el('line',{x1:X(ps[0].x),y1:Y(ps[0].y),x2:X(ps[1].x),y2:Y(ps[1].y),stroke:'var(--muted)','stroke-width':1.5},g);
+        el('rect',{x:b.x,y:b.y,width:b.w,height:b.h,rx:5,fill:'#c9b48a',stroke:'#8a7448'},g);
+        txt(p.ref,b.cx,b.cy,{'font-size':7.5,'font-weight':600,fill:'#3a2f1a',transform:`rotate(-90 ${b.cx} ${b.cy})`},g);
+        break;
+      case 'diode':
+        el('line',{x1:X(ps[0].x),y1:Y(ps[0].y),x2:X(ps[1].x),y2:Y(ps[1].y),stroke:'var(--muted)','stroke-width':1.5},g);
+        el('rect',{x:b.x,y:b.y,width:b.w,height:b.h,rx:2,...dark},g);
+        el('rect',{x:b.x,y:b.y,width:b.w,height:4,fill:'#cfcfcf'},g);
+        label('D1',b.cx+fx(14),b.cy,g,{'font-size':9});
+        break;
+      case 'fet':
+        el('rect',{x:b.x,y:b.y,width:b.w,height:b.h,rx:2,...dark},g);
+        txt(p.ref,b.cx,b.cy+1,{'font-size':8,'font-weight':600,fill:'var(--body-fg)'},g);
+        ps.forEach(q=>label(q.p,X(q.x),Y(q.y)-P*0.42,g,{'font-size':7.5}));
+        break;
+      case 'ccap':
+        el('rect',{x:b.x,y:b.y,width:b.w,height:b.h,rx:5,fill:'#d7a640',stroke:'#9a7420',opacity:.95},g);
+        txt(p.ref,b.cx,b.cy,{'font-size':8,'font-weight':600,fill:'#3a2a05'},g);
+        break;
+      case 'tb':
+        el('rect',{x:b.x,y:b.y,width:b.w,height:b.h,rx:2,fill:'#3f8f5e',stroke:'#2a6440',opacity:.9},g);
+        ps.forEach(q=>{ el('rect',{x:X(q.x)-5,y:Y(q.y)-P*1.6,width:10,height:10,rx:2,fill:'#1d2321'},g);
+          el('rect',{x:X(q.x)-6,y:Y(q.y)+P*0.9,width:12,height:P*0.9,rx:2,fill:'#e7c84a',stroke:'#8a6d10'},g);
+          txt(q.p,X(q.x),Y(q.y)-P*0.75,{'font-size':10,fill:'#f2f2ee','font-weight':600},g); });
+        txt(p.ref+' '+p.val,b.cx,Y(16.2),{'font-size':8.5,fill:'#f2f2ee','font-weight':600},g);
+        break;
+    }
+  });
+}
+
+const chips=document.getElementById('chips');
+['V12','GND','V5','VDC5','V33','SDA','SCL','G9','G44','LED1N','LED2N'].forEach(k=>{ const n=D.nets[k];
+  const b=document.createElement('button'); b.className='chip'; b.type='button'; b.setAttribute('aria-pressed','false');
+  b.innerHTML=`<i style="background:var(${n.color})"></i>${n.name}`;
+  b.onclick=()=>{ focus = focus===k?null:k; [...chips.children].forEach(c=>c.setAttribute('aria-pressed','false')); if(focus) b.setAttribute('aria-pressed','true'); draw(); };
+  chips.appendChild(b);
+});
+const vb1=document.getElementById('v-comp'), vb2=document.getElementById('v-sold');
+vb1.onclick=()=>{solder=false;vb1.setAttribute('aria-pressed','true');vb2.setAttribute('aria-pressed','false');draw();};
+vb2.onclick=()=>{solder=true;vb2.setAttribute('aria-pressed','true');vb1.setAttribute('aria-pressed','false');draw();};
+draw();
+
+const coord = p=>COL(p[0])+p[1];
+const wt=document.querySelector('#wires tbody');
+D.wires.forEach((w,i)=>{ const tr=document.createElement('tr');
+  tr.innerHTML=`<td class="mono">${i+1}</td><td><span class="netdot" style="background:var(${D.nets[w.net].color})"></span>${D.nets[w.net].name}</td><td class="mono">${w.pts.map(coord).join(' → ')}</td><td><span class="tag">${w.how}</span></td><td>${w.to}</td>`; wt.appendChild(tr); });
+const nWire=D.wires.filter(w=>w.how==='線').length+1;
+document.getElementById('wirenote').textContent=`「線」は裏面のスズメッキ線、「ジャンパー」は部品面に付けるスズメッキ線（合わせて${nWire}本）、「足」は抵抗・コンデンサの足を曲げてつなぐ接続です（基板図では破線）。GND（幹→枝）→ +12V → DCDC出力・5V → 3V3・I2C → ゲート・LED の順に進めます。`;
+
+const bom=[
+ ['U3','Seeed Studio XIAO ESP32S3',1],['—','ピンソケット 1×7（2.54mm、XIAO用）',2],
+ ['U2','0.96インチ OLED GME12864-52（I2C 4ピン）',1],['—','ピンソケット 1×4（2.54mm、OLED用）',1],
+ ['J2','ブレッドボード用2.1mm標準DCジャックDIP化キット 完成品（AE-DC-POWER-JACK-DIP、秋月 114610）',1],
+ ['U1','降圧DCDC M78AR05-1（MORNSUN、5V 1A、3端子）',1],
+ ['Q1, Q2','Nch MOSFET 2SK4017',2],['D1','ショットキーダイオード 1N5819',1],
+ ['R1, R2','抵抗 100Ω 1/4W',2],['R3, R4','抵抗 100kΩ 1/4W',2],
+ ['C1','積層セラミック 22µF 25V（5mmピッチ）',1],['C2','積層セラミック 22µF 16V以上（5mmピッチ）',1],
+ ['TB2','ターミナルブロック 2.54mm 2P（WJ141V-2.54-02P、秋月 116999）',1],['TB3','ターミナルブロック 2.54mm 4P（WJ141V-2.54-04P、秋月 117001）',1],
+ ['—','ユニバーサル基板 72×47mm（穴 25×15）',1],['—','スズメッキ線 0.5mm 前後',1],
+ ['—','ACアダプタ 12V 2A以上（2.1mm、センタープラス）',1]];
+const bt=document.querySelector('#bom tbody');
+bom.forEach(r=>{const tr=document.createElement('tr');tr.innerHTML=`<td class="mono">${r[0]}</td><td>${r[1]}</td><td class="mono">${r[2]}</td>`;bt.appendChild(tr);});
+
+// schematic
+const S=document.getElementById('sch');
+const s=(t,a)=>{const e=document.createElementNS('http://www.w3.org/2000/svg',t);for(const k in a)e.setAttribute(k,a[k]);S.appendChild(e);return e;};
+const st=(str,x,y,a)=>{const e=s('text',Object.assign({x,y,'font-size':12,fill:'var(--fg)','text-anchor':'middle'},a||{}));e.textContent=str;return e;};
+const ln=(pts,c)=>s('path',{d:pts.map((p,i)=>(i?'L':'M')+p[0]+' '+p[1]).join(' '),fill:'none',stroke:c||'var(--fg)','stroke-width':1.6});
+const dot=(x,y)=>s('circle',{cx:x,cy:y,r:3,fill:'var(--fg)'});
+const gnd=(x,y)=>{ln([[x,y],[x,y+10]]);ln([[x-10,y+10],[x+10,y+10]]);ln([[x-6,y+14],[x+6,y+14]]);ln([[x-2,y+18],[x+2,y+18]]);};
+const res=(x,y,vert,lab)=>{ if(vert){s('rect',{x:x-6,y:y,width:12,height:30,fill:'var(--surface)',stroke:'var(--fg)','stroke-width':1.6});st(lab,x-10,y+19,{'font-size':11,'text-anchor':'end'});}
+  else {s('rect',{x:x,y:y-6,width:30,height:12,fill:'var(--surface)',stroke:'var(--fg)','stroke-width':1.6});st(lab,x+15,y-12,{'font-size':11});} };
+st('DC12V 入力 (J2)',70,40,{'font-size':12,'font-weight':600});
+ln([[40,60],[300,60]],'var(--n-v12)'); st('+12V',40,54,{'text-anchor':'start',fill:'var(--n-v12)','font-size':11});
+ln([[110,60],[110,90]]); ln([[98,90],[122,90]]); ln([[98,96],[122,96]]); ln([[110,96],[110,120]]); gnd(110,120); st('C1 22µF',96,84,{'font-size':11,'text-anchor':'end'}); dot(110,60);
+s('rect',{x:170,y:80,width:70,height:50,fill:'var(--surface)',stroke:'var(--fg)','stroke-width':1.6}); st('U1',205,100,{'font-weight':600}); st('M78AR05-1',205,118,{'font-size':11});
+ln([[150,60],[150,105],[170,105]]); dot(150,60); ln([[205,130],[205,150]]); gnd(205,150);
+ln([[240,105],[270,105]],'var(--n-vdc5)');
+s('path',{d:'M270 95 L270 115 L290 105 Z',fill:'var(--fg)'}); ln([[290,95],[290,115]]); st('D1',280,88,{'font-size':11});
+ln([[258,105],[258,125]]); ln([[248,125],[268,125]]); ln([[248,131],[268,131]]); ln([[258,131],[258,150]]); gnd(258,150); dot(258,105); st('C2',236,145,{'font-size':11});
+ln([[290,105],[340,105]],'var(--n-v5)');
+s('rect',{x:340,y:70,width:120,height:200,fill:'var(--surface)',stroke:'var(--fg)','stroke-width':1.6,rx:4});
+st('XIAO',400,132,{'font-weight':600}); st('ESP32S3',400,148,{'font-size':11});
+st('5V',350,109,{'text-anchor':'start','font-size':10});
+st('3V3',350,184,{'text-anchor':'start','font-size':10}); st('GPIO5 (D4)',350,200,{'text-anchor':'start','font-size':10}); st('GPIO6 (D5)',350,216,{'text-anchor':'start','font-size':10});
+st('GPIO9 (D10)',452,169,{'text-anchor':'end','font-size':10}); st('GPIO44 (D7)',452,240,{'text-anchor':'end','font-size':10});
+st('GND',400,262,{'font-size':10}); ln([[400,270],[400,290]]); gnd(400,290);
+s('rect',{x:150,y:300,width:110,height:80,fill:'var(--surface)',stroke:'var(--fg)','stroke-width':1.6,rx:4});
+st('U2 OLED',205,330,{'font-weight':600}); st('GME12864-52',205,346,{'font-size':10}); st('0x3C',205,362,{'font-size':10,fill:'var(--muted)'});
+ln([[340,180],[300,180],[300,370],[260,370]],'var(--n-led2n)'); st('VCC',266,374,{'text-anchor':'start','font-size':9});
+ln([[340,196],[310,196],[310,350],[260,350]],'var(--n-g14)'); st('SDA',266,354,{'text-anchor':'start','font-size':9});
+ln([[340,212],[320,212],[320,330],[260,330]],'var(--n-gate2)'); st('SCL',266,334,{'text-anchor':'start','font-size':9});
+ln([[150,320],[130,320]]); gnd(130,320); st('GND',156,316,{'text-anchor':'start','font-size':9});
+function ch(y,dx,n,lead){
+  ln(lead,'var(--n-g13)'); const X=v=>v+dx;
+  res(X(500),y,false,'R'+n+' 100Ω'); ln([[X(530),y],[X(600),y]]); dot(X(560),y);
+  ln([[X(560),y],[X(560),y+10]]); res(X(560),y+10,true,'R'+(n+2)+' 100k'); ln([[X(560),y+40],[X(560),y+55]]); gnd(X(560),y+55);
+  ln([[X(600),y-20],[X(600),y+20]]);
+  ln([[X(608),y-24],[X(608),y+24]]); ln([[X(608),y-16],[X(630),y-16],[X(630),y-40]]); ln([[X(608),y+16],[X(630),y+16],[X(630),y+55]]); gnd(X(630),y+55);
+  s('path',{d:`M${X(610)} ${y+16} l8 -4 l0 8 z`,fill:'var(--fg)'});
+  st('Q'+n,X(660),y+4,{'font-size':11,'font-weight':600}); st('2SK4017',X(668),y+18,{'font-size':10});
+  s('path',{d:`M${X(620)} ${y-70} L${X(640)} ${y-70} L${X(630)} ${y-55} Z`,fill:'var(--fg)'}); ln([[X(620),y-55],[X(640),y-55]]);
+  ln([[X(630),y-55],[X(630),y-40]],'var(--n-led1n)');
+  if(n===2){ s('path',{d:`M${X(680)} ${y-70} L${X(700)} ${y-70} L${X(690)} ${y-55} Z`,fill:'var(--fg)'}); ln([[X(680),y-55],[X(700),y-55]]);
+    ln([[X(690),y-55],[X(690),y-40],[X(630),y-40]],'var(--n-led1n)'); dot(X(630),y-40); ln([[X(690),y-70],[X(690),60]],'var(--n-v12)'); dot(X(690),60);
+    st('LED2',X(630),y-78,{'font-size':10}); st('LED3',X(690),y-78,{'font-size':10});
+    st('12V 3W ×2',X(712),y-64,{'font-size':11,'text-anchor':'start'}); st('並列 (TB3)',X(712),y-50,{'font-size':10,fill:'var(--muted)','text-anchor':'start'}); }
+  else { st('LED1 12V 3W',X(690),y-64,{'font-size':11,'text-anchor':'start'}); st('(TB2)',X(690),y-50,{'font-size':10,fill:'var(--muted)','text-anchor':'start'}); }
+  ln([[X(630),y-70],[X(630),60]],'var(--n-v12)'); dot(X(630),60);
+}
+ln([[300,60],[890,60]],'var(--n-v12)');
+ch(169,0,1,[[460,169],[500,169]]);
+ch(340,200,2,[[460,240],[480,240],[480,340],[700,340]]);
+})();
+</script>
+</html>
