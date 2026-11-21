@@ -14,7 +14,7 @@
 
 ### MicroLink
 
-- 配布元: https://github.com/CamM2325/microlink （コミット 216da3300f0493b0860247d43f7af5ce29df63a5）
+- 配布元: https://github.com/CamM2325/microlink （コミット 1cb8d1c8a8408ad1b9a339b18bed3e970b71dafe）
 - ライセンス: MIT（全文は [components/microlink/LICENSE](components/microlink/LICENSE)）
 - **このプロジェクトで改変しています。** 改変内容は [components/microlink/VERSION](components/microlink/VERSION) に記載しています
 
@@ -62,11 +62,10 @@ Author: Daniel Hope <daniel.hope@smartalock.com>
 
 | 部分 | 出典 | ライセンス |
 |---|---|---|
-| X25519（`src/x25519.c`、`.../refc/x25519.c`） | STROBE（Mike Hamburg） | MIT、Copyright (c) 2015-2016 Cryptography Research, Inc.（全文は [x25519-license.txt](components/microlink/x25519-license.txt)） |
+| X25519（`.../refc/x25519.c`） | STROBE（Mike Hamburg） | MIT、Copyright (c) 2015-2016 Cryptography Research, Inc.（全文は [x25519-license.txt](components/microlink/x25519-license.txt)） |
 | Poly1305（`.../refc/poly1305-donna*`） | poly1305-donna（Andrew Moon） | パブリックドメインまたは MIT |
 | BLAKE2s（`.../refc/blake2s.c`） | RFC 7693 のリファレンス実装（Markku-Juhani O. Saarinen, Jean-Philippe Aumasson） | Simplified BSD License（RFC のコード部分、Copyright (c) IETF Trust and the persons identified as authors） |
 | NaCl crypto_box（`src/nacl_box.c`） | TweetNaCl / D. J. Bernstein のリファレンス実装を元にした実装 | パブリックドメイン |
-| Cortex-M0 用 Curve25519（`.../crypto/cortex/`） | μNaCl（Björn Haase, Ana Helena Sánchez） | パブリックドメイン（ESP32 向けのビルドでは使われません） |
 
 ---
 
