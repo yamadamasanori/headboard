@@ -185,8 +185,6 @@ static const char CONFIG_PAGE_HTML[] =
 
 "<div class='form-group'><label>Cellular APN</label>"
 "<input type='text' id='cellular_apn'></div>"
-"<div class='form-group'><label>SIM PIN</label>"
-"<input type='password' id='cellular_sim_pin'></div>"
 "<div class='form-group'><label>PPP Username</label>"
 "<input type='text' id='ppp_user' placeholder='blank = none'></div>"
 "<div class='form-group'><label>PPP Password</label>"
@@ -232,6 +230,8 @@ static const char CONFIG_PAGE_HTML[] =
 
 /* ---- JavaScript ---- */
 "<script>"
+/* HTML-escape anything that came from the device/user before using innerHTML */
+"function esc(v){return String(v==null?'':v).replace(/[&<>\"']/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',\"'\":'&#39;'}[c];});}"
 "let allowedPeers=[];"
 "let wifiNetworks=[];"
 
@@ -292,8 +292,8 @@ static const char CONFIG_PAGE_HTML[] =
 "var te=document.getElementById('mTasks');"
 "if(d.tasks){"
 "te.innerHTML=Object.entries(d.tasks).map(([n,t])=>"
-"'<div class=\"task-row\"><span class=\"tn\">'+n+'</span>"
-"<span class=\"ts\">'+t.state+' | '+t.stack_free+' B free</span></div>'"
+"'<div class=\"task-row\"><span class=\"tn\">'+esc(n)+'</span>"
+"<span class=\"ts\">'+esc(t.state)+' | '+esc(t.stack_free)+' B free</span></div>'"
 ").join('');"
 "}else{te.innerHTML='';}"
 "}catch(e){}"
@@ -308,7 +308,6 @@ static const char CONFIG_PAGE_HTML[] =
 "document.getElementById('device_prefix').value=d.device_prefix||'';"
 "document.getElementById('device_name_full').value=d.device_name_full||'';"
 "document.getElementById('cellular_apn').value=d.cellular_apn||'';"
-"document.getElementById('cellular_sim_pin').value=d.cellular_sim_pin||'';"
 "document.getElementById('ppp_user').value=d.ppp_user||'';"
 "document.getElementById('ppp_pass').value=d.ppp_pass||'';"
 "var mp=d.max_peers||0;"
@@ -336,7 +335,6 @@ static const char CONFIG_PAGE_HTML[] =
 "device_prefix:document.getElementById('device_prefix').value,"
 "device_name_full:document.getElementById('device_name_full').value,"
 "cellular_apn:document.getElementById('cellular_apn').value,"
-"cellular_sim_pin:document.getElementById('cellular_sim_pin').value,"
 "ppp_user:document.getElementById('ppp_user').value,"
 "ppp_pass:document.getElementById('ppp_pass').value,"
 "max_peers:parseInt(document.getElementById('max_peers').value)||0,"
@@ -347,6 +345,7 @@ static const char CONFIG_PAGE_HTML[] =
 "};"
 "try{"
 "const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});"
+"if(!r.ok){showMsg('settingsMsg','Save failed: '+(await r.text()),false);return;}"
 "const d=await r.json();"
 "showMsg('settingsMsg','Saved. Restart device for changes to take effect.',true);"
 "}catch(e){showMsg('settingsMsg','Save failed: '+e,false);}"
@@ -370,8 +369,8 @@ static const char CONFIG_PAGE_HTML[] =
 "el.innerHTML=wifiNetworks.map(function(w,i){"
 "var h='<div class=\"wifi-item\">';"
 "h+='<span class=\"num\">#'+(i+1)+'</span>';"
-"h+='<span class=\"ssid\">'+w.ssid+'</span>';"
-"h+='<span class=\"wpw\">'+w.pass+'</span>';"
+"h+='<span class=\"ssid\">'+esc(w.ssid)+'</span>';"
+"h+='<span class=\"wpw\">'+esc(w.pass)+'</span>';"
 "h+='<div class=\"wifi-btns\">';"
 "if(i>0)h+='<button class=\"btn-outline btn-sm\" onclick=\"moveWifi('+i+',-1)\">\\u2191</button>';"
 "if(i<wifiNetworks.length-1)h+='<button class=\"btn-outline btn-sm\" onclick=\"moveWifi('+i+',1)\">\\u2193</button>';"
@@ -438,8 +437,8 @@ static const char CONFIG_PAGE_HTML[] =
 "}"
 "el.innerHTML=allowedPeers.map((p,i)=>"
 "'<div class=\"peer-item\">"
-"<span class=\"ip\">'+p.ip+'</span>"
-"<span class=\"name\">'+p.label+'</span>"
+"<span class=\"ip\">'+esc(p.ip)+'</span>"
+"<span class=\"name\">'+esc(p.label)+'</span>"
 "<button class=\"btn-danger btn-sm\" onclick=\"removeAllowed('+i+')\">Remove</button>"
 "</div>'"
 ").join('');"
@@ -477,7 +476,7 @@ static const char CONFIG_PAGE_HTML[] =
 /* ---- Restart ---- */
 "async function doRestart(){"
 "if(!confirm('Restart the device?'))return;"
-"try{await fetch('/api/restart',{method:'POST'});}catch(e){}"
+"try{await fetch('/api/restart',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});}catch(e){}"
 "document.getElementById('vpnIp').textContent='Restarting...';"
 "}"
 

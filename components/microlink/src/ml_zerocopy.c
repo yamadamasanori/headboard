@@ -45,6 +45,12 @@ extern void wireguardif_network_rx(void *arg, struct udp_pcb *pcb,
                                     struct pbuf *p, const ip_addr_t *addr, u16_t port);
 static void zc_send_in_tcpip(void *arg);
 
+/* The instance the receive callback may deliver into. Set on tcpip_thread
+ * once the PCB is registered; cleared when it is removed, and by a deinit
+ * that could not reach tcpip_thread, so a PCB left registered never touches
+ * ml (which the caller may free later) again. */
+static microlink_t *s_zc_owner;
+
 /* ============================================================================
  * PCB Receive Callback (runs in tcpip_thread — FAST PATH)
  *
@@ -56,8 +62,8 @@ static void zc_send_in_tcpip(void *arg);
 
 static void zc_pcb_recv_cb(void *arg, struct udp_pcb *pcb,
                             struct pbuf *p, const ip_addr_t *addr, u16_t port) {
-    microlink_t *ml = (microlink_t *)arg;
-    if (!ml || !p) {
+    microlink_t *ml = __atomic_load_n(&s_zc_owner, __ATOMIC_ACQUIRE);
+    if (!ml || ml != (microlink_t *)arg || !p) {
         if (p) pbuf_free(p);
         return;
     }
@@ -88,6 +94,7 @@ static void zc_pcb_recv_cb(void *arg, struct udp_pcb *pcb,
             entry->src_ip_nbo = ip_addr_get_ip4_u32(addr);
             entry->src_port = port;
             __atomic_store_n(&ml->zc.rx_head, next, __ATOMIC_RELEASE);
+            ml_wg_mgr_wake(ml);
         }
         /* else: ring full, drop (DISCO is retried by design) */
         pbuf_free(p);
@@ -171,6 +178,7 @@ static void zc_pcb_create_in_tcpip(void *arg) {
 
     /* Register receive callback */
     udp_recv(ml->zc.pcb, zc_pcb_recv_cb, ml);
+    __atomic_store_n(&s_zc_owner, ml, __ATOMIC_RELEASE);
 
     ctx->result = ERR_OK;
     xSemaphoreGive(ctx->done);
@@ -178,9 +186,14 @@ static void zc_pcb_create_in_tcpip(void *arg) {
 
 static void zc_pcb_remove_in_tcpip(void *arg) {
     zc_setup_ctx_t *ctx = (zc_setup_ctx_t *)arg;
+    __atomic_store_n(&s_zc_owner, NULL, __ATOMIC_RELEASE);
     if (ctx->ml->zc.pcb) {
         udp_remove(ctx->ml->zc.pcb);
         ctx->ml->zc.pcb = NULL;
+    }
+    if (ctx->ml->zc.stale_pcb) {
+        udp_remove(ctx->ml->zc.stale_pcb);
+        ctx->ml->zc.stale_pcb = NULL;
     }
     xSemaphoreGive(ctx->done);
 }
@@ -191,6 +204,13 @@ static void zc_pcb_remove_in_tcpip(void *arg) {
 
 esp_err_t ml_zerocopy_init(microlink_t *ml) {
     ESP_LOGI(TAG, "Initializing zero-copy WG path");
+
+    if (ml->zc.pcb || ml->zc.stale_pcb) {
+        /* A previous deinit could not remove its PCB; clearing ml->zc now
+         * would lose it while it is still registered. */
+        ESP_LOGE(TAG, "Previous zero-copy PCB still registered, not re-initializing");
+        return ESP_ERR_INVALID_STATE;
+    }
 
     /* Clear ring buffer state */
     memset(&ml->zc, 0, sizeof(ml->zc));
@@ -227,20 +247,47 @@ esp_err_t ml_zerocopy_init(microlink_t *ml) {
     return ESP_OK;
 }
 
-void ml_zerocopy_deinit(microlink_t *ml) {
-    if (!ml->zc.pcb) return;
+esp_err_t ml_zerocopy_deinit(microlink_t *ml) {
+    if (!ml->zc.pcb && !ml->zc.stale_pcb) return ESP_OK;
 
     ESP_LOGI(TAG, "Shutting down zero-copy WG path");
 
+    /* Posted through the tcpip mailbox (not run under the core lock) so any
+     * zc_send_in_tcpip() already queued with this PCB runs before it is
+     * removed. The semaphore is static, so it cannot fail to allocate (the
+     * old code then returned with the PCB still live, its receive callback
+     * reading a netif about to be freed), and a failed post is retried
+     * rather than waited on forever. Approach from antmanler 446c58f. */
+    StaticSemaphore_t done_buf;
     zc_setup_ctx_t ctx = {
         .ml = ml,
-        .done = xSemaphoreCreateBinary(),
+        .done = xSemaphoreCreateBinaryStatic(&done_buf),
     };
-    if (!ctx.done) return;
-
-    tcpip_callback(zc_pcb_remove_in_tcpip, &ctx);
+    err_t err = ERR_MEM;
+    for (int i = 0; i < 20; i++) {
+        err = tcpip_callback(zc_pcb_remove_in_tcpip, &ctx);
+        if (err == ERR_OK) break;
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    if (err != ERR_OK) {
+        /* The PCB stays registered: detach its callback from ml and report
+         * it, so the caller doesn't free what the PCB path can still reach.
+         * It is parked in stale_pcb: ml->zc.pcb = NULL makes every sender
+         * (disco_udp_sendto, ml_zerocopy_send) use the BSD socket instead
+         * of a PCB whose replies are now dropped, and the next deinit
+         * retries the removal. */
+        __atomic_store_n(&s_zc_owner, NULL, __ATOMIC_RELEASE);
+        if (ml->zc.pcb) {
+            ml->zc.stale_pcb = ml->zc.pcb;
+            ml->zc.pcb = NULL;
+        }
+        ESP_LOGE(TAG, "Could not reach tcpip_thread to remove the zero-copy PCB (%d)", err);
+        vSemaphoreDelete(ctx.done);
+        return ESP_FAIL;
+    }
     xSemaphoreTake(ctx.done, portMAX_DELAY);
     vSemaphoreDelete(ctx.done);
+    return ESP_OK;
 }
 
 esp_err_t ml_zerocopy_send(microlink_t *ml, const uint8_t *data, size_t len,

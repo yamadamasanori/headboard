@@ -57,11 +57,13 @@ typedef struct {
     const char *tailscale_auth_key;
     const char *device_name;
 
-    /* Timing (0 = use defaults) */
+    /* Timing (0 = use the default; the _ms defaults come from Kconfig
+     * "Network Switching", CONFIG_ML_NET_SWITCH_*) */
     uint32_t wifi_timeout_ms;           /* WiFi connect timeout (default: 30000) */
     uint32_t health_check_interval_ms;  /* Health check period (default: 30000) */
     uint32_t health_fail_count;         /* Failures before switch (default: 3) */
-    uint32_t failback_check_ms;         /* WiFi recovery check (default: 120000, 0=disable) */
+    uint32_t failback_check_ms;         /* WiFi recovery check (default: 120000; set
+                                           CONFIG_ML_NET_SWITCH_FAILBACK_MS=0 to disable) */
 
     /* Callbacks (all optional) */
     void (*on_connected)(ml_net_type_t type, void *user_data);
@@ -85,6 +87,8 @@ esp_err_t ml_net_switch_init(const ml_net_switch_config_t *config);
 
 /**
  * Deinitialize and free resources.
+ * Calls ml_net_switch_stop(); if the switch task has not exited, nothing is
+ * freed (an error is logged) and deinit can be retried later.
  */
 void ml_net_switch_deinit(void);
 
@@ -99,7 +103,13 @@ esp_err_t ml_net_switch_start(void);
 /**
  * Stop all connections and halt the state machine.
  *
- * @return ESP_OK on success
+ * Signals the switch task and waits for it to tear down MicroLink and the
+ * active transport and exit. Must not be called from an on_* callback.
+ *
+ * @return ESP_OK once the task has exited,
+ *         ESP_ERR_TIMEOUT if it was still busy (e.g. powering up the modem)
+ *         after 5 minutes; call again to keep waiting,
+ *         ESP_ERR_INVALID_STATE if called from the switch task itself.
  */
 esp_err_t ml_net_switch_stop(void);
 
@@ -118,14 +128,16 @@ ml_net_switch_state_t ml_net_switch_get_state(void);
 /**
  * Get the current microlink_t handle.
  * Returns NULL if not connected.
+ *
+ * The switcher destroys and recreates the handle when it restarts the VPN
+ * (connect timeout, failed rebind, retry after both transports failed), so
+ * do not cache it across switches; fetch it again after on_connected.
+ * Before it destroys a handle that on_connected announced, it calls
+ * on_switching or on_disconnected (ml_net_switch_stop() excepted): close
+ * sockets created on the handle (microlink_udp_close()) there and create
+ * them again in on_connected. examples/failover_connect shows the pattern.
  */
 microlink_t *ml_net_switch_get_handle(void);
-
-/**
- * Get the current UDP socket handle (if one was created).
- * Returns NULL if not available.
- */
-microlink_udp_socket_t *ml_net_switch_get_udp_socket(void);
 
 /**
  * Convert state to string for logging.

@@ -23,7 +23,7 @@
 | `components/mdns/` | mDNS（Espressif、Apache-2.0、mdns-v1.15.1 を同梱。`headboard-xxxxxx.local` の名前で本体を開くため） |
 | `partitions.csv` | フラッシュの区画（N16R8 用。ファームウェア 4MB × 2 の OTA 構成と、クラッシュの記録 256KB） |
 | `partitions_8mb.csv` | フラッシュ 8MB 用の区画（XIAO 用。ファームウェア 3.75MB × 2 と、クラッシュの記録 256KB） |
-| `components/microlink/` | Tailscale クライアント MicroLink（MIT、コミット 216da33 を同梱。認証失敗の検出、定期ログを減らす、tailnet 経由の TCP でクラッシュする不具合の修正と、本家で未マージの修正（スレッドの安全性、DERP の接続失敗時のメモリの解放、大きな転送での取りこぼしなど）を取り込んだ変更あり、`VERSION` 参照） |
+| `components/microlink/` | Tailscale クライアント MicroLink（MIT、コミット 1cb8d1c を同梱。中継（DERP）の地域が違う相手に送る変更あり、`VERSION` 参照） |
 | `sdkconfig.defaults*` | ビルド設定（共通 / ESP32-S3 用 / ボードごと（`.n16r8`、`.xiao`）） |
 | `keys/headboard-signing-pubkey.pem` | ファームウェアの署名を確かめる公開鍵（秘密鍵はリポジトリに入れない。「ファームウェアの署名」参照） |
 | `web/index.html` | 書き込み・設定ページ。本体にも組み込まれ、本体の設定ページとしても使われる |
@@ -403,8 +403,9 @@ espsecure.py extract_public_key --version 2 --keyfile secrets/headboard-signing-
 ESP32 で動く Tailscale クライアントは、コミュニティ製の [MicroLink](https://github.com/CamM2325/microlink)（MIT ライセンス、ESP-IDF 専用）だけなので、それを `components/microlink/` に同梱しています。
 
 - PSRAM（N16R8・XIAO ともに 8MB）を使い、MicroLink の標準値（受信バッファ 512KB、ピア 16 台）で動かします
-- 認証キーが拒否されたことを状態表示 LED で知らせるため、また数秒ごとの定期ログを減らすため、MicroLink に小さな変更を加えています（`components/microlink/VERSION` に記載）
-- 本家にまだ取り込まれていない修正の PR のうち、この本体で役立つものを取り込んでいます（同じく `VERSION` に記載）
+- 認証キーが拒否されたことは、MicroLink の状態（`ML_STATE_AUTH_FAILED`）から状態表示 LED で知らせます
+- 本家の MicroLink に加えた変更は `components/microlink/VERSION` に記載しています
+- tailnet のアクセス制御（ACL）は本体でも守ります（MicroLink の既定）。tailnet の ACL で許していない相手からは、本体の設定ページを開けません
 - 中継（DERP）の既定の地域は東京（7）にしています。ほかの地域で使うときは `sdkconfig.defaults` の `CONFIG_ML_DERP_REGION` を変えてください
 - 相手（ブローカーなど）の中継の地域が本体と違うとき（例: 米国のサーバー上の Home Assistant）は、その地域の中継にも 1 本だけ追加で接続して送ります（2.7.0 から。本家の MicroLink は自分の地域にしか接続しないため、届きませんでした）。TLS の作業領域は PSRAM に置いています（2.7.0 から。ESP-IDF の既定の内蔵 RAM では空きが足りないため）。PSRAM の空きが 96KB 未満のときは、追加の接続はしません。60 秒使わなければ切ります
 - MicroLink は公式のクライアントではないため、Tailscale 側の仕様変更で動かなくなる可能性があります

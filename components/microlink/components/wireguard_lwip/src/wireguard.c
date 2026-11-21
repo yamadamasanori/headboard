@@ -44,10 +44,10 @@
 
 // 5.4 Messages
 // Constants
-static const uint8_t CONSTRUCTION[37] = "Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s"; // The UTF-8 string literal "Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s", 37 bytes of output
-static const uint8_t IDENTIFIER[34] = "WireGuard v1 zx2c4 Jason@zx2c4.com"; // The UTF-8 string literal "WireGuard v1 zx2c4 Jason@zx2c4.com", 34 bytes of output
-static const uint8_t LABEL_MAC1[8] = "mac1----"; // Label-Mac1 The UTF-8 string literal "mac1----", 8 bytes of output.
-static const uint8_t LABEL_COOKIE[8] = "cookie--"; // Label-Cookie The UTF-8 string literal "cookie--", 8 bytes of output
+static const uint8_t CONSTRUCTION[37] __attribute__((nonstring)) = "Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s"; // The UTF-8 string literal "Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s", 37 bytes of output
+static const uint8_t IDENTIFIER[34] __attribute__((nonstring)) = "WireGuard v1 zx2c4 Jason@zx2c4.com"; // The UTF-8 string literal "WireGuard v1 zx2c4 Jason@zx2c4.com", 34 bytes of output
+static const uint8_t LABEL_MAC1[8] __attribute__((nonstring)) = "mac1----"; // Label-Mac1 The UTF-8 string literal "mac1----", 8 bytes of output.
+static const uint8_t LABEL_COOKIE[8] __attribute__((nonstring)) = "cookie--"; // Label-Cookie The UTF-8 string literal "cookie--", 8 bytes of output
 
 static const char *base64_lookup = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -317,52 +317,7 @@ static void wireguard_kdf3(uint8_t *tau1, uint8_t *tau2, uint8_t *tau3, const ui
 	crypto_zero(output, sizeof(output));
 }
 
-bool wireguard_check_replay(struct wireguard_keypair *keypair, uint64_t seq) {
-	// Implementation of packet replay window - as per RFC2401
-	// Adapted from code in Appendix C at https://tools.ietf.org/html/rfc2401
-	uint32_t diff;
-	bool result = false;
-	size_t ReplayWindowSize = sizeof(keypair->replay_bitmap) * CHAR_BIT; // 32 bits
-
-	// WireGuard data packet counter starts from 0 but algorithm expects packet numbers to start from 1
-	seq++;
-
-	if (seq != 0) {
-		if (seq > keypair->replay_counter) {
-			// new larger sequence number
-			diff = seq - keypair->replay_counter;
-			if (diff < ReplayWindowSize) {
-				// In window
-				keypair->replay_bitmap <<= diff;
-				// set bit for this packet
-				keypair->replay_bitmap |= 1;
-			} else {
-				// This packet has a "way larger"
-				keypair->replay_bitmap = 1;
-			}
-			keypair->replay_counter = seq;
-			// larger is good
-			result = true;
-		} else {
-			diff = keypair->replay_counter - seq;
-			if (diff < ReplayWindowSize) {
-				if (keypair->replay_bitmap & ((uint32_t)1 << diff)) {
-					// already seen
-				} else {
-					// mark as seen
-					keypair->replay_bitmap |= ((uint32_t)1 << diff);
-					// out of order but good
-					result = true;
-				}
-			} else {
-				// too old or wrapped
-			}
-		}
-	} else {
-		// first == 0 or wrapped
-	}
-	return result;
-}
+/* wireguard_check_replay() lives in wireguard-filter.c (host-testable). */
 
 struct wireguard_keypair *get_peer_keypair_for_idx(struct wireguard_peer *peer, uint32_t idx) {
 	if (peer->curr_keypair.valid && peer->curr_keypair.local_index == idx) {
@@ -395,7 +350,11 @@ static uint32_t wireguard_generate_unique_index(struct wireguard_device *device)
 					(result == peer->prev_keypair.local_index) ||
 					(result == peer->next_keypair.local_index) ||
 					(result == peer->handshake.local_index);
-
+			if (existing) {
+				// Index already in use - regenerate (previously only the LAST
+				// peer slot was effectively checked).
+				break;
+			}
 		}
 	} while (existing);
 
@@ -459,17 +418,19 @@ void keypair_update(struct wireguard_peer *peer, struct wireguard_keypair *recei
 	}
 }
 
-static void add_new_keypair(struct wireguard_peer *peer, struct wireguard_keypair new_keypair) {
-	if (new_keypair.initiator) {
+// new_keypair by pointer: a by-value copy would leave the session keys in
+// another stack frame nobody wipes.
+static void add_new_keypair(struct wireguard_peer *peer, const struct wireguard_keypair *new_keypair) {
+	if (new_keypair->initiator) {
 		if (peer->next_keypair.valid) {
 			peer->prev_keypair = peer->next_keypair;
 			keypair_destroy(&peer->next_keypair);
 		} else  {
 			peer->prev_keypair = peer->curr_keypair;
 		}
-		peer->curr_keypair = new_keypair;
+		peer->curr_keypair = *new_keypair;
 	} else {
-		peer->next_keypair =  new_keypair;
+		peer->next_keypair = *new_keypair;
 		keypair_destroy(&peer->prev_keypair);
 	}
 }
@@ -512,7 +473,9 @@ void wireguard_start_session(struct wireguard_peer *peer, bool initiator) {
 	handshake->local_index = 0;
 	handshake->valid = false;
 
-	add_new_keypair(peer, new_keypair);
+	add_new_keypair(peer, &new_keypair);
+	// The keys now live only in the peer's keypair slots
+	crypto_zero(&new_keypair, sizeof(new_keypair));
 }
 
 uint8_t wireguard_get_message_type(const uint8_t *data, size_t len) {
@@ -611,7 +574,9 @@ struct wireguard_peer *wireguard_process_initiation_message(struct wireguard_dev
 
 					// Check that timestamp is increasing and we haven't had too many initiations (should only get one per peer every 5 seconds max?)
 					replay = (memcmp(t, peer->greatest_timestamp, WIREGUARD_TAI64N_LEN) <= 0); // tai64n is big endian so we can use memcmp to compare
-					rate_limit = (peer->last_initiation_rx - now) < (1000 / MAX_INITIATIONS_PER_SECOND);
+					// Elapsed time is (now - last); the old (last - now) wrapped, so the limit
+					// never applied. last_initiation_rx == 0 means none received yet.
+					rate_limit = (peer->last_initiation_rx != 0) && ((now - peer->last_initiation_rx) < (1000 / MAX_INITIATIONS_PER_SECOND));
 
 					if (!replay && !rate_limit) {
 						// Success! Copy everything to peer
@@ -1001,11 +966,6 @@ bool wireguard_device_init(struct wireguard_device *device, const uint8_t *priva
 	return device->valid;
 }
 
-void wireguard_encrypt_packet(uint8_t *dst, const uint8_t *src, size_t src_len, struct wireguard_keypair *keypair) {
-	wireguard_aead_encrypt(dst, src, src_len, NULL, 0, keypair->sending_counter, keypair->sending_key);
-	keypair->sending_counter++;
-}
-
 bool wireguard_decrypt_packet(uint8_t *dst, const uint8_t *src, size_t src_len, uint64_t counter, struct wireguard_keypair *keypair) {
 	return wireguard_aead_decrypt(dst, src, src_len, NULL, 0, counter, keypair->receiving_key);
 }
@@ -1083,38 +1043,3 @@ bool wireguard_base64_decode(const char *str, uint8_t *out, size_t *outlen) {
 	return result;
 }
 
-bool wireguard_base64_encode(const uint8_t *in, size_t inlen, char *out, size_t *outlen) {
-	bool result = false;
-	int read_offset = 0;
-	int write_offset = 0;
-	uint8_t byte1, byte2, byte3;
-	uint32_t tmp;
-	char c;
-	size_t len = 4 * ((inlen + 2) / 3);
-	int padding = (3 - (inlen % 3));
-	if (padding > 2) padding = 0;
-	if (*outlen > len) {
-
-		while (read_offset < inlen) {
-			// Read three bytes
-			byte1 = (read_offset < inlen) ? in[read_offset++] : 0;
-			byte2 = (read_offset < inlen) ? in[read_offset++] : 0;
-			byte3 = (read_offset < inlen) ? in[read_offset++] : 0;
-			// Turn into 24 bit intermediate
-			tmp = (byte1 << 16) | (byte2 << 8) | (byte3);
-			// Write out 4 characters each representing 6 bits of input
-			out[write_offset++] = base64_lookup[(tmp >> 18) & 0x3F];
-			out[write_offset++] = base64_lookup[(tmp >> 12) & 0x3F];
-			c = (write_offset < len - padding) ? base64_lookup[(tmp >> 6) & 0x3F] : '=';
-			out[write_offset++] = c;
-			c = (write_offset < len - padding) ? base64_lookup[(tmp) & 0x3F] : '=';
-			out[write_offset++] = c;
-		}
-		out[len] = '\0';
-		*outlen = len;
-		result = true;
-	} else {
-		// Not enough data to put in base64 and null terminate
-	}
-	return result;
-}

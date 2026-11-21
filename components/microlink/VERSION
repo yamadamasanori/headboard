@@ -1,29 +1,22 @@
-MicroLink v2 (https://github.com/CamM2325/microlink) commit 216da3300f0493b0860247d43f7af5ce29df63a5, MIT
+MicroLink v2 (https://github.com/CamM2325/microlink) commit 1cb8d1c8a8408ad1b9a339b18bed3e970b71dafe, MIT
+(components/microlink/ of that commit; nothing else from the repository)
 headboard-led local patches:
-- auth_error flag + microlink_auth_failed() (see ml_coord.c do_register)
-- ml_derp.c: periodic HEARTBEAT log lowered from WARN to DEBUG
-- wireguardif.c: pass decrypted packets to netif->input (tcpip_input) instead of calling ip_input
-  directly from the wg_mgr task (TCP over the tailnet, e.g. MQTT, crashed with an lwIP assert)
-- Upstream PRs applied (all unmerged upstream as of 2026-10-31):
-  - #37 ml_derp_connect(): check mbedTLS setup errors and free TLS state on every failure.
-    The PR uses `goto fail` without defining the label; the label was added here, and the
-    nine failure paths after the HTTP upgrade (ServerKey/ClientInfo/ServerInfo) also go there
-  - #30 per-packet datapath logging moved to DEBUG (the ml_derp.c HEARTBEAT hunk was already
-    applied locally)
-  - #29 ML_DERP_REGION is a Kconfig option (sdkconfig.defaults sets 7, Tokyo)
-  - #28 commit 2 only (0de347e): udp_sendto, udp_new, netif_list/netif_set_up and
-    netif_set_link_up/down run on tcpip_thread. Commits 1 and 3 are the same as the
-    netif->input fix above
-  - #31 cache the DISCO X25519 shared secret
-  - #32 deeper WG/DISCO RX queues, blocking receive in ml_wg_mgr, drain the DISCO socket
-    (the trailing vTaskDelay hunk was applied by hand after #30)
-  - #21 don't install unvalidated peer endpoints at peer-add (DERP until DISCO validates)
 - ml_derp.c: send to a peer through the peer's home DERP region (up to ML_DERP_MAX_ALT=1 extra
-  connection, opened on demand, read like the home connection, closed after 60 s idle; only when
-  enough memory is free (>= 96 KB PSRAM with CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC, which headboard
-  sets), otherwise the home connection is used as before). Upstream only
-  connected to its own home region, so peers homed elsewhere (e.g. a Home Assistant on a US VM,
-  region 10, while we are in Tokyo, region 7) were unreachable without a direct UDP path.
-  ml_derp_tx_item_t has a region field, ml_derp_conn_t has region/last_used_ms/retry_after_ms
-- Known remaining: wireguardif_network_rx() still runs on the wg_mgr task, so peer keypair
-  state is shared with the tcpip_thread output path without a lock (headboard issue #1)
+  connection, opened on demand, read like the home connection (also waited on in the idle
+  select()), closed after 60 s idle; only when enough memory is free (>= 96 KB PSRAM with
+  CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC, which headboard sets), otherwise the home connection is used
+  as before). Upstream only connects to its own home region, so peers homed elsewhere (e.g. a
+  Home Assistant on a US VM, region 10, while we are in Tokyo, region 7) were unreachable without
+  a direct UDP path. ml_derp_tx_item_t has a region field, ml_derp_conn_t has
+  region/last_used_ms/retry_after_ms; the TLS helpers take the connection (ml_derp_conn_t *)
+  instead of microlink_t, and ml_derp_connect() is derp_conn_open() on the home connection
+- microlink.c: initialise the extra connections' sockets to -1, and unblock them on stop
+Upstream PRs: none applied. Everything applied before (#21, #28, #29, #30, #31, #32; #37 was
+superseded by #22) is merged upstream as of this commit. Open PRs reviewed as of 2026-11-21
+(none open).
+Earlier local patches now in upstream: rejected auth key (ML_STATE_AUTH_FAILED /
+ML_STATE_NEEDS_LOGIN replace microlink_auth_failed()), HEARTBEAT log at DEBUG, decrypted packets
+via netif->input, netif_set_link_up/down on tcpip_thread, TAI64N log removed. The peer keypair
+race between wg_mgr and tcpip_thread (headboard issue #1) is fixed upstream (s_wg_tx_lock /
+s_wg_hs_lock in wireguardif.c).
+headboard sets CONFIG_ML_OTA_ROLLBACK=n (main/ota.c confirms an update once Wi-Fi connects).

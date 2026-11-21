@@ -28,6 +28,16 @@
 #include "lwip/netdb.h"
 #include "mbedtls/net_sockets.h"
 #include "mbedtls/error.h"
+#include "esp_vfs_eventfd.h"
+#include <sys/select.h>
+#include <unistd.h>
+#if CONFIG_ML_DERP_VERIFY_CERT
+#include "esp_crt_bundle.h"
+#elif !defined(CONFIG_MBEDTLS_CERTIFICATE_BUNDLE)
+/* ML_DERP_VERIFY_CERT depends on the bundle, so turning the bundle off
+ * silently turns relay certificate checking off as well. Say so. */
+#warning "MBEDTLS_CERTIFICATE_BUNDLE is disabled: DERP relay TLS certificates will not be verified (ML_DERP_VERIFY_CERT unavailable)"
+#endif
 #include "nacl_box.h"
 #include <string.h>
 #include <errno.h>
@@ -72,36 +82,33 @@ static esp_err_t derp_conn_open(microlink_t *ml, ml_derp_conn_t *c, uint16_t reg
 static void derp_conn_close(ml_derp_conn_t *c);
 
 /* ============================================================================
- * Custom BIO callbacks for non-blocking TLS I/O
+ * Custom BIO callbacks for TLS I/O
  *
- * These wrap lwIP recv/send with guaranteed timeout behavior.
- * We don't trust mbedtls_net_recv_timeout on lwIP because lwIP's select()
- * can sometimes block indefinitely on ESP32.
+ * These wrap the socket layer (ml_read_sock/ml_write_sock) so that both
+ * lwIP and AT socket backends work transparently.
+ *
+ * recv is provided as a blocking recv (f_recv). With the recv_timeout BIO
+ * (f_recv_timeout) combined with mbedtls_ssl_conf_read_timeout, the TLS 1.3
+ * handshake fails with MBEDTLS_ERR_SSL_BAD_INPUT_DATA (Bad input
+ * parameters), so we align with the scheme that already works on the
+ * control plane side (coord_bio_recv in ml_coord_tls.c). Timeouts are
+ * enforced by SO_RCVTIMEO on the socket; a timeout surfaces as EAGAIN ->
+ * MBEDTLS_ERR_SSL_WANT_READ.
  * ========================================================================== */
 
 /**
- * Custom recv with timeout for mbedtls BIO.
- * Uses SO_RCVTIMEO on the socket as the timeout mechanism (simpler than select).
- * Returns bytes read, or MBEDTLS_ERR_SSL_TIMEOUT, MBEDTLS_ERR_SSL_WANT_READ.
+ * Custom blocking recv for mbedtls BIO (f_recv signature, no timeout arg).
+ * SO_RCVTIMEO on the socket bounds the wait; a timeout surfaces as
+ * EAGAIN/EWOULDBLOCK which we map to MBEDTLS_ERR_SSL_WANT_READ.
  */
-static int ml_derp_bio_recv_timeout(void *ctx, unsigned char *buf, size_t len,
-                                      uint32_t timeout) {
+static int ml_derp_bio_recv(void *ctx, unsigned char *buf, size_t len) {
     int fd = *(int *)ctx;
     if (fd < 0) return MBEDTLS_ERR_NET_INVALID_CONTEXT;
-
-    /* Set SO_RCVTIMEO to the requested timeout.
-     * If timeout is 0 (mbedTLS default = "no timeout"), use 10s as a sane
-     * default to avoid indefinite blocking on AT sockets. */
-    uint32_t effective_timeout = (timeout > 0) ? timeout : DERP_CONNECT_TIMEOUT_MS;
-    struct timeval tv;
-    tv.tv_sec = effective_timeout / 1000;
-    tv.tv_usec = (effective_timeout % 1000) * 1000;
-    ml_setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
     int ret = (int)ml_read_sock(fd, buf, len);
     if (ret < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            return MBEDTLS_ERR_SSL_TIMEOUT;
+            return MBEDTLS_ERR_SSL_WANT_READ;
         }
         if (errno == EPIPE || errno == ECONNRESET) {
             return MBEDTLS_ERR_NET_CONN_RESET;
@@ -110,6 +117,9 @@ static int ml_derp_bio_recv_timeout(void *ctx, unsigned char *buf, size_t len,
             return MBEDTLS_ERR_SSL_WANT_READ;
         }
         return MBEDTLS_ERR_NET_RECV_FAILED;
+    }
+    if (ret == 0) {
+        return MBEDTLS_ERR_NET_CONN_RESET;
     }
     return ret;
 }
@@ -135,6 +145,33 @@ static int ml_derp_bio_send(void *ctx, const unsigned char *buf, size_t len) {
         return MBEDTLS_ERR_NET_SEND_FAILED;
     }
     return ret;
+}
+
+/**
+ * Common cleanup for failure paths in ml_derp_connect() after TLS init.
+ *
+ * Previously we only closed the socket and never freed the mbedTLS
+ * contexts, leaking entropy/ctr_drbg/ssl_conf on every connection failure,
+ * and — for failures after a successful ssl_setup — the ~20KB TLS I/O
+ * buffers as well (internal RAM, since CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC=y).
+ * Combined with infinite retries, internal RAM shrank monotonically,
+ * making mbedtls_ssl_setup's ALLOC_FAILED -> handshake's Bad input
+ * parameters progressively worse on its own. So always free everything.
+ *
+ * mbedtls_*_free() zeroizes the structs after freeing, so a later
+ * ml_derp_disconnect() freeing the same contexts is not a double free.
+ */
+static void derp_tls_abort(ml_derp_conn_t *c, int sock) {
+    mbedtls_ssl_free(&c->ssl);
+    mbedtls_ssl_config_free(&c->ssl_conf);
+#if ML_TLS_LEGACY_RNG
+    mbedtls_ctr_drbg_free(&c->ctr_drbg);
+    mbedtls_entropy_free(&c->entropy);
+#endif
+    if (sock >= 0) {
+        ml_close_sock(sock);
+    }
+    c->sockfd = -1;
 }
 
 /* DERP frame types */
@@ -324,6 +361,8 @@ static void route_derp_packet(microlink_t *ml, uint8_t *data, size_t len,
     QueueHandle_t target = (type == PKT_DISCO) ? ml->disco_rx_queue : ml->wg_rx_queue;
     if (xQueueSend(target, &pkt, 0) != pdTRUE) {
         free(data);
+    } else {
+        ml_wg_mgr_wake(ml);
     }
 }
 
@@ -378,7 +417,8 @@ static void dispatch_derp_frame(microlink_t *ml, ml_derp_conn_t *c, uint8_t fram
 
 /**
  * Try to read one DERP frame.
- * Uses mbedtls recv_timeout (100ms) so ssl_read never blocks indefinitely.
+ * SO_RCVTIMEO on the socket bounds each read, so ssl_read never blocks
+ * indefinitely (timeout surfaces as WANT_READ from the blocking-recv BIO).
  * Returns: 1 = frame read and dispatched, 0 = timeout (no data), <0 = error
  */
 static int poll_derp_read(microlink_t *ml, ml_derp_conn_t *c) {
@@ -397,8 +437,14 @@ static int poll_derp_read(microlink_t *ml, ml_derp_conn_t *c) {
         return n;
     }
     if (n < 5) {
-        ESP_LOGW(TAG, "DERP partial header: got %d of 5 bytes", n);
-        return -1;
+        /* ssl_read returns at most the rest of the current TLS record, and
+         * a relay may split a frame header across records. Finish it; the
+         * stream is only misaligned if the rest never arrives. Same 5 s
+         * as the payload: the next record can be slow on the AT bridge. */
+        if (derp_tls_read_all(c, header + n, 5 - n, 5000) < 0) {
+            ESP_LOGW(TAG, "DERP partial header: got %d of 5 bytes", n);
+            return -1;
+        }
     }
 
     uint8_t frame_type = header[0];
@@ -449,7 +495,13 @@ static int poll_derp_read(microlink_t *ml, ml_derp_conn_t *c) {
     }
 
     /* For RecvPacket (0x05): first 32 bytes are sender's public key */
-    if (frame_type == DERP_FRAME_RECV_PACKET && len > 32) {
+    if (frame_type == DERP_FRAME_RECV_PACKET && len <= 32) {
+        /* Too short to carry a source key + payload: drop rather than route
+         * it with an all-zero source key. */
+        free(buf);
+        return 1;
+    }
+    if (frame_type == DERP_FRAME_RECV_PACKET) {
         memcpy(src_key, buf, 32);
         payload = malloc(len - 32);
         if (payload) {
@@ -469,6 +521,86 @@ static int poll_derp_read(microlink_t *ml, ml_derp_conn_t *c) {
 /* ============================================================================
  * DERP TX Queue Processing
  * ========================================================================== */
+
+/* ============================================================================
+ * Idle waiting (no fixed-interval polling)
+ *
+ * The DERP I/O task used to spin with vTaskDelay(1) (~1000 wakeups/s while
+ * idle), which also kept the chip out of light sleep. It now blocks in
+ * select() on the DERP socket plus an eventfd that ml_derp_queue_send()
+ * signals, so it wakes for incoming data, outgoing packets, or a periodic
+ * timeout. The AT-socket bridge has no real fd: there it waits on the TX
+ * queue with a short timeout (incoming data is polled at that rate).
+ * Approach after TailTiny's idle work (Asimmimx/tailtiny 6335e77, bfa95f3).
+ * ========================================================================== */
+
+#define DERP_IDLE_WAIT_MS     250   /* upper bound: keepalives/reconnects are slower */
+#define DERP_AT_POLL_MS       20
+
+static void derp_wake(microlink_t *ml) {
+    int fd = ml->derp_wake_fd;
+    if (fd >= 0) {
+        uint64_t one = 1;
+        (void)write(fd, &one, sizeof(one));
+    }
+}
+
+static void derp_wake_init(microlink_t *ml) {
+    if (ml->derp_wake_fd >= 0) return;
+    esp_vfs_eventfd_config_t cfg = ESP_VFS_EVENTD_CONFIG_DEFAULT();
+    esp_err_t err = esp_vfs_eventfd_register(&cfg);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {   /* INVALID_STATE: already registered */
+        ESP_LOGW(TAG, "eventfd unavailable (%s); DERP task will poll", esp_err_to_name(err));
+        return;
+    }
+    int fd = eventfd(0, 0);
+    if (fd < 0) {
+        ESP_LOGW(TAG, "eventfd() failed (errno %d); DERP task will poll", errno);
+        return;
+    }
+    ml->derp_wake_fd = fd;
+}
+
+static void derp_idle_wait(microlink_t *ml) {
+    if (uxQueueMessagesWaiting(ml->derp_tx_queue) > 0) return;
+    if (ml->derp.connected && mbedtls_ssl_get_bytes_avail(&ml->derp.ssl) > 0) return;
+    /* headboard: connections to peers' home regions are read the same way */
+    bool alt_at = false;
+    for (int i = 0; i < ML_DERP_MAX_ALT; i++) {
+        ml_derp_conn_t *c = &ml->derp_alt[i];
+        if (!c->connected) continue;
+        if (mbedtls_ssl_get_bytes_avail(&c->ssl) > 0) return;
+        if (ml_at_socket_is_at_fd(c->sockfd)) alt_at = true;
+    }
+
+    int sock = ml->derp.sockfd;
+    int wfd = ml->derp_wake_fd;
+    if (sock >= 0 && wfd >= 0 && !ml_at_socket_is_at_fd(sock) && !alt_at) {
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(sock, &rfds);
+        FD_SET(wfd, &rfds);
+        int maxfd = sock > wfd ? sock : wfd;
+        for (int i = 0; i < ML_DERP_MAX_ALT; i++) {
+            ml_derp_conn_t *c = &ml->derp_alt[i];
+            if (c->connected && c->sockfd >= 0) {
+                FD_SET(c->sockfd, &rfds);
+                if (c->sockfd > maxfd) maxfd = c->sockfd;
+            }
+        }
+        struct timeval tv = { .tv_sec = 0, .tv_usec = DERP_IDLE_WAIT_MS * 1000 };
+        int n = select(maxfd + 1, &rfds, NULL, NULL, &tv);
+        if (n > 0 && FD_ISSET(wfd, &rfds)) {
+            uint64_t v;
+            (void)read(wfd, &v, sizeof(v));
+        } else if (n < 0) {
+            vTaskDelay(pdMS_TO_TICKS(10));   /* never spin on a select error */
+        }
+    } else {
+        ml_derp_tx_item_t peek;
+        (void)xQueuePeek(ml->derp_tx_queue, &peek, pdMS_TO_TICKS(DERP_AT_POLL_MS));
+    }
+}
 
 /* Queue a packet for DERP TX with backpressure */
 esp_err_t ml_derp_queue_send(microlink_t *ml, const uint8_t *dest_key,
@@ -503,6 +635,7 @@ esp_err_t ml_derp_queue_send(microlink_t *ml, const uint8_t *dest_key,
     /* Try to send to queue */
     if ((is_wg_handshake ? xQueueSendToFront(ml->derp_tx_queue, &item, 0)
                          : xQueueSend(ml->derp_tx_queue, &item, 0)) == pdTRUE) {
+        derp_wake(ml);
         return ESP_OK;
     }
 
@@ -513,6 +646,7 @@ esp_err_t ml_derp_queue_send(microlink_t *ml, const uint8_t *dest_key,
             free(dropped.data);  /* Drop oldest */
         }
         if (xQueueSend(ml->derp_tx_queue, &item, 0) == pdTRUE) {
+            derp_wake(ml);
             return ESP_OK;
         }
     }
@@ -530,7 +664,8 @@ esp_err_t ml_derp_queue_send(microlink_t *ml, const uint8_t *dest_key,
  * an extra connection when the region differs from ours; falls back to the
  * home connection when that is not possible. Runs on the DERP I/O task only. */
 static ml_derp_conn_t *derp_conn_for_region(microlink_t *ml, uint16_t region) {
-    if (region == 0 || region == ml->derp_home_region || ml->derp_home_region == 0) {
+    if (region == 0 || region == ml->derp_home_region || ml->derp_home_region == 0 ||
+        region == ml->derp.region) {
         return &ml->derp;
     }
     uint64_t now = ml_get_time_ms();
@@ -633,6 +768,7 @@ static void derp_alt_service(microlink_t *ml, uint32_t *frames_rx) {
 void ml_derp_tx_task(void *arg) {
     microlink_t *ml = (microlink_t *)arg;
     ESP_LOGI(TAG, "DERP I/O task started (Core %d)", xPortGetCoreID());
+    derp_wake_init(ml);
 
     uint32_t frames_rx = 0;
     uint32_t frames_tx = 0;
@@ -659,7 +795,7 @@ void ml_derp_tx_task(void *arg) {
         {
             uint64_t now_ms = loop_start;
             if (now_ms - last_status_ms > 10000) {
-                ESP_LOGI(TAG, "DERP status: connected=%d fd=%d rx=%lu tx=%lu loops=%lu",
+                ESP_LOGD(TAG, "DERP status: connected=%d fd=%d rx=%lu tx=%lu loops=%lu",
                          ml->derp.connected, ml->derp.sockfd,
                          (unsigned long)frames_rx, (unsigned long)frames_tx,
                          (unsigned long)loop_count);
@@ -677,8 +813,16 @@ void ml_derp_tx_task(void *arg) {
         /* ---- Handle DERP connect request from coord task ---- */
         {
             EventBits_t bits = xEventGroupGetBits(ml->events);
-            if ((bits & ML_EVT_DERP_CONNECT_REQ) && !ml->derp.connected) {
+            /* Always consume a connect request. One that arrives while we
+             * are connected (or reconnecting) is already satisfied; left
+             * set, it would fire after the next read/write error and run a
+             * connect over the failed, not yet freed session. A pending
+             * RECONNECT does the full disconnect + connect itself. */
+            if (bits & ML_EVT_DERP_CONNECT_REQ) {
                 xEventGroupClearBits(ml->events, ML_EVT_DERP_CONNECT_REQ);
+            }
+            if ((bits & ML_EVT_DERP_CONNECT_REQ) && !ml->derp.connected &&
+                !(bits & ML_EVT_DERP_RECONNECT)) {
                 /* Retry up to 3 times with 2s backoff */
                 for (int attempt = 0; attempt < 3 && !ml->derp.connected; attempt++) {
                     if (attempt > 0) {
@@ -687,6 +831,9 @@ void ml_derp_tx_task(void *arg) {
                     } else {
                         ESP_LOGI(TAG, "DERP connect requested, connecting from I/O task");
                     }
+                    /* Each attempt can cost a DNS timeout plus a 20 s TLS
+                     * handshake; don't start one that stop will discard. */
+                    if (ml_shutdown_requested(ml)) break;
                     if (ml_derp_connect(ml) == ESP_OK) {
                         connected_since_ms = ml_get_time_ms();
                         verbose_phase = true;
@@ -708,6 +855,7 @@ void ml_derp_tx_task(void *arg) {
                         ESP_LOGW(TAG, "DERP reconnect retry %d/3 in 2s...", attempt + 1);
                         vTaskDelay(pdMS_TO_TICKS(2000));
                     }
+                    if (ml_shutdown_requested(ml)) break;
                     if (ml_derp_connect(ml) == ESP_OK) {
                         connected_since_ms = ml_get_time_ms();
                         verbose_phase = true;
@@ -794,12 +942,18 @@ void ml_derp_tx_task(void *arg) {
             derp_alt_service(ml, &frames_rx);
         }
 
-        /* Yield briefly */
-        vTaskDelay(pdMS_TO_TICKS(1));
+        /* Block until there is work (incoming data, queued TX) or a timeout */
+        derp_idle_wait(ml);
     }
 
+    /* Release the TLS session, the socket and any packets still queued for
+     * TX. Nobody else may: the connection is owned by this task. */
+    ML_HEAP_TRACE("derp_tx: exit begin");
+    ml_derp_disconnect(ml);
+    ML_HEAP_TRACE("derp_tx: TLS + socket freed");
+
     ESP_LOGI(TAG, "DERP I/O task exiting");
-    vTaskDelete(NULL);
+    ml_task_exit(ml, ML_TASK_BIT_DERP_TX);
 }
 
 /* ============================================================================
@@ -810,12 +964,29 @@ void ml_derp_tx_task(void *arg) {
  * `home`). Split out of ml_derp_connect() so that extra connections to peers'
  * home regions use the same code. */
 static esp_err_t derp_conn_open(microlink_t *ml, ml_derp_conn_t *c, uint16_t region, bool home) {
+    /* A failed session is only marked (connected=false) by the read/write
+     * error paths. Free it before the TLS contexts and sockfd below are
+     * re-initialised, or its TLS buffers and lwIP socket leak. */
+    if (c->sockfd >= 0) {
+        ESP_LOGW(TAG, "DERP connect over an open session (fd=%d); closing it first",
+                 c->sockfd);
+        if (home) {
+            ml_derp_disconnect(ml);
+        } else {
+            derp_conn_close(c);
+        }
+    }
+
     /* Determine DERP host/port from DERPMap with node failover.
      * Always start from node 0 (the first/preferred node in the DERPMap).
      * Only rotate to a different node after a SUCCESSFUL connection drops,
-     * NOT on connection failure (to avoid bouncing between nodes). */
+     * NOT on connection failure (to avoid bouncing between nodes).
+     * headboard: a peer's home region must be in the DERPMap (no default host) */
     const char *derp_host = home ? ML_DERP_HOST : NULL;
     int derp_port = ML_DERP_PORT;
+    /* Track the region actually used, for logging (differs from HomeDERP on fallback) */
+    uint16_t derp_region_used = region ? region : ML_DERP_REGION;
+    bool node_selected = false;
 
     if (ml->derp_region_count > 0 && region > 0) {
         for (int i = 0; i < ml->derp_region_count; i++) {
@@ -829,6 +1000,7 @@ static esp_err_t derp_conn_open(microlink_t *ml, ml_derp_conn_t *c, uint16_t reg
                         if (ml->derp_regions[i].nodes[attempt].derp_port > 0) {
                             derp_port = ml->derp_regions[i].nodes[attempt].derp_port;
                         }
+                        node_selected = true;
                         break;
                     }
                 }
@@ -837,15 +1009,43 @@ static esp_err_t derp_conn_open(microlink_t *ml, ml_derp_conn_t *c, uint16_t reg
         }
     }
 
-    if (!derp_host) {
+    /* Fallback for when HomeDERP is not present in the DERPMap.
+     * With headscale-based controllers (e.g. ZTL), HomeDERP may still point
+     * at an official Tailscale region (e.g. 9) while the DERPMap only
+     * contains their own region (e.g. 900). Falling back to the default
+     * ML_DERP_HOST (official) in that case is a dead end — neither auth nor
+     * TLS succeeds against the official DERP — so instead pick the first
+     * usable node (not avoid, not stun-only, has a hostname) from the
+     * DERPMap the controller handed out. In the normal official-Tailscale
+     * case, HomeDERP is in the DERPMap so node_selected is set and this
+     * branch is never taken; behavior is unchanged. */
+    if (!node_selected && !home) {
         ESP_LOGW(TAG, "DERP region %d is not in the DERPMap", region);
         return ESP_FAIL;
+    }
+    if (!node_selected && ml->derp_region_count > 0) {
+        for (int i = 0; i < ml->derp_region_count && !node_selected; i++) {
+            ml_derp_region_t *r = &ml->derp_regions[i];
+            if (r->avoid) continue;
+            for (int j = 0; j < r->node_count; j++) {
+                if (!r->nodes[j].stun_only && r->nodes[j].hostname[0]) {
+                    derp_host = r->nodes[j].hostname;
+                    derp_port = (r->nodes[j].derp_port > 0) ? r->nodes[j].derp_port
+                                                            : ML_DERP_PORT;
+                    derp_region_used = r->region_id;
+                    node_selected = true;
+                    ESP_LOGW(TAG, "Home DERP region %d not in DERPMap, falling back to region %d (%s)",
+                             ml->derp_home_region, derp_region_used, derp_host);
+                    break;
+                }
+            }
+        }
     }
 
     int64_t t_derp_start = esp_timer_get_time();
 
     ESP_LOGI(TAG, "Connecting to DERP %s:%d (region %d%s)",
-             derp_host, derp_port, region ? region : ML_DERP_REGION, home ? "" : ", peer's home region");
+             derp_host, derp_port, derp_region_used, home ? "" : ", peer's home region");
 
     /* DNS resolve — accept IPv4 or IPv6 (carrier may be IPv6-only) */
     struct addrinfo hints = { .ai_family = AF_UNSPEC, .ai_socktype = SOCK_STREAM };
@@ -859,7 +1059,7 @@ static esp_err_t derp_conn_open(microlink_t *ml, ml_derp_conn_t *c, uint16_t reg
     }
 
     int64_t t_derp_dns = esp_timer_get_time();
-    ESP_LOGI(TAG, "[TIMING] DERP DNS: %lld ms", (t_derp_dns - t_derp_start) / 1000);
+    ESP_LOGD(TAG, "[TIMING] DERP DNS: %ld ms", (long)((t_derp_dns - t_derp_start) / 1000));
 
     /* TCP connect — use address family from DNS result */
     int sock = ml_socket(res->ai_family, SOCK_STREAM, 0);
@@ -882,87 +1082,139 @@ static esp_err_t derp_conn_open(microlink_t *ml, ml_derp_conn_t *c, uint16_t reg
     ml_freeaddrinfo(res);
 
     int64_t t_derp_tcp = esp_timer_get_time();
-    ESP_LOGI(TAG, "[TIMING] DERP TCP connect: %lld ms", (t_derp_tcp - t_derp_dns) / 1000);
+    ESP_LOGD(TAG, "[TIMING] DERP TCP connect: %ld ms", (long)((t_derp_tcp - t_derp_dns) / 1000));
 
-    /* TLS setup.
-     * Every setup call's return value is now checked, and every failure
-     * path from here on frees all four mbedTLS structures (not just the
-     * socket) via `goto fail`. Previously, none of mbedtls_ctr_drbg_seed()/
-     * mbedtls_ssl_config_defaults()/mbedtls_ssl_setup()'s return values were
-     * checked, so a failure there (e.g. under low memory - exactly the kind
-     * of allocation these calls perform) let the code continue straight
-     * into mbedtls_ssl_handshake() with a partially/incorrectly initialized
-     * SSL context, which can surface as a confusing downstream
-     * MBEDTLS_ERR_SSL_BAD_INPUT_DATA ("Bad input parameters to function")
-     * rather than the real, earlier failure. Separately, and regardless of
-     * that: every failure path after this point (TLS handshake, HTTP
-     * upgrade write, upgrade response timeout/read/rejection) only ever
-     * closed the raw socket, never freeing entropy/ctr_drbg/ssl_config/ssl -
-     * a real, permanent leak of all four structures on every failed DERP
-     * (re)connect attempt, since ml_derp_disconnect() (the only place that
-     * frees them) only ever runs on an *established* connection later
-     * dropping, not on a connect attempt that never reached
-     * ML_EVT_DERP_CONNECTED at all. On an unstable link that fails DERP
-     * connects repeatedly, this leaks every single retry. */
+    /* TLS setup */
     mbedtls_ssl_init(&c->ssl);
     mbedtls_ssl_config_init(&c->ssl_conf);
+#if ML_TLS_LEGACY_RNG
     mbedtls_entropy_init(&c->entropy);
     mbedtls_ctr_drbg_init(&c->ctr_drbg);
+#endif
 
-    int ret;
-    ret = mbedtls_ctr_drbg_seed(&c->ctr_drbg, mbedtls_entropy_func,
-                                 &c->entropy, NULL, 0);
-    if (ret != 0) {
-        char err_buf[128];
-        mbedtls_strerror(ret, err_buf, sizeof(err_buf));
-        ESP_LOGE(TAG, "mbedtls_ctr_drbg_seed failed: %s", err_buf);
-        goto fail;
+    /* Always check the return values of the mbedTLS setup functions and
+     * abort immediately on failure instead of proceeding to the handshake.
+     * On failure (typically ALLOC_FAILED), mbedtls_ssl_setup resets
+     * ssl->conf to NULL in its error label, so ignoring the error and
+     * proceeding to the handshake trips the sanity check with
+     * MBEDTLS_ERR_SSL_BAD_INPUT_DATA — misreported as "Bad input
+     * parameters" when the real cause is out-of-memory. */
+    int cfg_ret;
+#if ML_TLS_LEGACY_RNG
+    cfg_ret = mbedtls_ctr_drbg_seed(&c->ctr_drbg, mbedtls_entropy_func,
+                           &c->entropy, NULL, 0);
+    if (cfg_ret != 0) {
+        ESP_LOGE(TAG, "ctr_drbg_seed failed: -0x%04x", -cfg_ret);
+        derp_tls_abort(c, sock);
+        return ESP_FAIL;
     }
+#endif
 
-    ret = mbedtls_ssl_config_defaults(&c->ssl_conf,
-                                       MBEDTLS_SSL_IS_CLIENT,
-                                       MBEDTLS_SSL_TRANSPORT_STREAM,
-                                       MBEDTLS_SSL_PRESET_DEFAULT);
-    if (ret != 0) {
-        char err_buf[128];
-        mbedtls_strerror(ret, err_buf, sizeof(err_buf));
-        ESP_LOGE(TAG, "mbedtls_ssl_config_defaults failed: %s", err_buf);
-        goto fail;
+    cfg_ret = mbedtls_ssl_config_defaults(&c->ssl_conf,
+                                 MBEDTLS_SSL_IS_CLIENT,
+                                 MBEDTLS_SSL_TRANSPORT_STREAM,
+                                 MBEDTLS_SSL_PRESET_DEFAULT);
+    if (cfg_ret != 0) {
+        ESP_LOGE(TAG, "ssl_config_defaults failed: -0x%04x", -cfg_ret);
+        derp_tls_abort(c, sock);
+        return ESP_FAIL;
+    }
+#if CONFIG_ML_DERP_VERIFY_CERT
+    /* Verify the relay certificate against ESP-IDF's CA bundle; the host name
+     * is checked via mbedtls_ssl_set_hostname() below. */
+    mbedtls_ssl_conf_authmode(&c->ssl_conf, MBEDTLS_SSL_VERIFY_REQUIRED);
+    if (esp_crt_bundle_attach(&c->ssl_conf) != ESP_OK) {
+        ESP_LOGE(TAG, "TLS setup failed: could not attach the CA bundle");
+        derp_tls_abort(c, sock);
+        return ESP_FAIL;
+    }
+#else
+    {
+        static bool s_warned;
+        if (!s_warned) {
+            s_warned = true;
+            ESP_LOGW(TAG, "DERP TLS certificates are not verified (%s)",
+#if defined(CONFIG_MBEDTLS_CERTIFICATE_BUNDLE)
+                     "CONFIG_ML_DERP_VERIFY_CERT=n"
+#else
+                     "CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=n"
+#endif
+                     );
+        }
     }
     mbedtls_ssl_conf_authmode(&c->ssl_conf, MBEDTLS_SSL_VERIFY_NONE);
+#endif
+#if ML_TLS_LEGACY_RNG
     mbedtls_ssl_conf_rng(&c->ssl_conf, mbedtls_ctr_drbg_random, &c->ctr_drbg);
-    mbedtls_ssl_conf_read_timeout(&c->ssl_conf, DERP_CONNECT_TIMEOUT_MS);
+#endif
+    /* Pin the DERP connection to TLS 1.2. When the DERP relay uses a
+     * Let's Encrypt ECDSA certificate, the ESP-IDF mbedTLS TLS 1.3 path
+     * cannot interpret the certificate's signature algorithm OID and fails
+     * with "X509 - Signature algorithm (oid) is unsupported" (even with
+     * authmode=VERIFY_NONE, TLS 1.3 cannot skip certificate processing).
+     * DERP also accepts TLS 1.2, so pin to 1.2 to bypass the 1.3
+     * certificate path. */
+    mbedtls_ssl_conf_max_tls_version(&c->ssl_conf, MBEDTLS_SSL_VERSION_TLS1_2);
 
-    ret = mbedtls_ssl_setup(&c->ssl, &c->ssl_conf);
-    if (ret != 0) {
-        char err_buf[128];
-        mbedtls_strerror(ret, err_buf, sizeof(err_buf));
-        ESP_LOGE(TAG, "mbedtls_ssl_setup failed: %s", err_buf);
-        goto fail;
+    cfg_ret = mbedtls_ssl_setup(&c->ssl, &c->ssl_conf);
+    if (cfg_ret != 0) {
+        /* -0x7F00 (ALLOC_FAILED) means internal RAM exhaustion. To allocate
+         * the ~20KB TLS I/O buffers from PSRAM instead, set
+         * CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y. */
+        ESP_LOGE(TAG, "mbedtls_ssl_setup failed: -0x%04x", -cfg_ret);
+        derp_tls_abort(c, sock);
+        return ESP_FAIL;
     }
-    mbedtls_ssl_set_hostname(&c->ssl, derp_host);
+    cfg_ret = mbedtls_ssl_set_hostname(&c->ssl, derp_host);
+    if (cfg_ret != 0) {
+        ESP_LOGE(TAG, "ssl_set_hostname failed: -0x%04x", -cfg_ret);
+        derp_tls_abort(c, sock);
+        return ESP_FAIL;
+    }
     /* Store socket fd BEFORE setting bio.
      * Use custom BIO callbacks that route through ml_read_sock/ml_write_sock,
      * which transparently support both lwIP and AT socket backends.
      * Timeout is handled via SO_RCVTIMEO. */
     c->sockfd = sock;
+    /* Pass a blocking recv as f_recv and set f_recv_timeout to NULL
+     * (same scheme as the control plane; avoids the TLS 1.3 Bad input
+     * data failure). */
     mbedtls_ssl_set_bio(&c->ssl, &c->sockfd,
-                         ml_derp_bio_send, NULL, ml_derp_bio_recv_timeout);
+                         ml_derp_bio_send, ml_derp_bio_recv, NULL);
 
-    /* TLS handshake - socket has 10s SO_RCVTIMEO from connect phase. */
+    /* TLS handshake - socket has 10s SO_RCVTIMEO from connect phase; the
+     * overall deadline stops a relay that accepts TCP and then stalls from
+     * hanging this task forever. */
+    int ret;
+    const int64_t hs_deadline_us = esp_timer_get_time() + 20LL * 1000 * 1000;
     while ((ret = mbedtls_ssl_handshake(&c->ssl)) != 0) {
-        if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
+        if ((ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) &&
+            esp_timer_get_time() < hs_deadline_us && !ml_shutdown_requested(ml)) {
             continue;
         }
         char err_buf[128];
+#if defined(MBEDTLS_ERROR_C)
         mbedtls_strerror(ret, err_buf, sizeof(err_buf));
+#else
+        /* CONFIG_MBEDTLS_ERROR_STRINGS=n: mbedTLS 4 has no strerror stub */
+        snprintf(err_buf, sizeof(err_buf), "-0x%04x", (unsigned)-ret);
+#endif
         ESP_LOGE(TAG, "TLS handshake failed: %s", err_buf);
-        goto fail;
+#if CONFIG_ML_DERP_VERIFY_CERT
+        uint32_t vflags = mbedtls_ssl_get_verify_result(&c->ssl);
+        if (vflags != 0 && vflags != (uint32_t)-1) {
+            char why[160];
+            mbedtls_x509_crt_verify_info(why, sizeof(why), "", vflags);
+            ESP_LOGE(TAG, "DERP certificate for %s not accepted: %s", derp_host, why);
+        }
+#endif
+        derp_tls_abort(c, sock);
+        return ESP_FAIL;
     }
 
     int64_t t_derp_tls = esp_timer_get_time();
-    ESP_LOGI(TAG, "[TIMING] DERP TLS handshake: %lld ms", (t_derp_tls - t_derp_tcp) / 1000);
-    ESP_LOGI(TAG, "TLS connected to DERP");
+    ESP_LOGD(TAG, "[TIMING] DERP TLS handshake: %ld ms", (long)((t_derp_tls - t_derp_tcp) / 1000));
+    ESP_LOGD(TAG, "TLS connected to DERP");
 
     /* HTTP Upgrade: GET /derp with Upgrade: DERP header */
     char upgrade_req[256];
@@ -977,7 +1229,8 @@ static esp_err_t derp_conn_open(microlink_t *ml, ml_derp_conn_t *c, uint16_t reg
     ret = mbedtls_ssl_write(&c->ssl, (const uint8_t *)upgrade_req, strlen(upgrade_req));
     if (ret < 0) {
         ESP_LOGE(TAG, "Failed to send HTTP upgrade");
-        goto fail;
+        derp_tls_abort(c, sock);
+        return ESP_FAIL;
     }
 
     /* Read HTTP response byte-by-byte until \r\n\r\n to avoid over-reading
@@ -991,7 +1244,8 @@ static esp_err_t derp_conn_open(microlink_t *ml, ml_derp_conn_t *c, uint16_t reg
         while (resp_len < (int)sizeof(resp_buf) - 1) {
             if (ml_get_time_ms() - http_start > DERP_CONNECT_TIMEOUT_MS) {
                 ESP_LOGE(TAG, "HTTP upgrade response timeout");
-                goto fail;
+                derp_tls_abort(c, sock);
+                return ESP_FAIL;
             }
 
             ret = mbedtls_ssl_read(&c->ssl, resp_buf + resp_len, 1);
@@ -1002,11 +1256,13 @@ static esp_err_t derp_conn_open(microlink_t *ml, ml_derp_conn_t *c, uint16_t reg
                     continue;
                 }
                 ESP_LOGE(TAG, "HTTP upgrade read failed: -0x%04x", -ret);
-                goto fail;
+                derp_tls_abort(c, sock);
+                return ESP_FAIL;
             }
             if (ret == 0) {
                 ESP_LOGE(TAG, "Connection closed during HTTP upgrade");
-                goto fail;
+                derp_tls_abort(c, sock);
+                return ESP_FAIL;
             }
             resp_len++;
 
@@ -1021,11 +1277,12 @@ static esp_err_t derp_conn_open(microlink_t *ml, ml_derp_conn_t *c, uint16_t reg
 
         resp_buf[resp_len] = '\0';
 
-        if (!found_end || strstr((char *)resp_buf, "101") == NULL) {
+        if (!found_end || strncmp((char *)resp_buf, "HTTP/1.1 101", 12) != 0) {
             ESP_LOGE(TAG, "DERP upgrade rejected: %.100s", resp_buf);
-            goto fail;
+            derp_tls_abort(c, sock);
+            return ESP_FAIL;
         }
-        ESP_LOGI(TAG, "HTTP 101 Switching Protocols received");
+        ESP_LOGD(TAG, "HTTP 101 Switching Protocols received");
     }
 
     /* Match v1 exactly: O_NONBLOCK + short SO_RCVTIMEO + SO_SNDTIMEO.
@@ -1052,13 +1309,15 @@ static esp_err_t derp_conn_open(microlink_t *ml, ml_derp_conn_t *c, uint16_t reg
     esp_err_t err = derp_recv_frame_header(c, &frame_type, &frame_len, DERP_CONNECT_TIMEOUT_MS);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to read ServerKey frame header (err=%d)", err);
-        goto fail;
+        derp_tls_abort(c, sock);
+        return ESP_FAIL;
     }
 
     if (frame_type != DERP_FRAME_SERVER_KEY || frame_len < 40) {
         ESP_LOGE(TAG, "Expected ServerKey frame (0x01), got 0x%02x len=%lu",
                  frame_type, (unsigned long)frame_len);
-        goto fail;
+        derp_tls_abort(c, sock);
+        return ESP_FAIL;
     }
 
     /* Read and verify 8-byte magic */
@@ -1066,25 +1325,28 @@ static esp_err_t derp_conn_open(microlink_t *ml, ml_derp_conn_t *c, uint16_t reg
     static const uint8_t DERP_MAGIC[8] = {0x44, 0x45, 0x52, 0x50, 0xf0, 0x9f, 0x94, 0x91};
     if (derp_tls_read_all(c, magic, 8, DERP_CONNECT_TIMEOUT_MS) < 0) {
         ESP_LOGE(TAG, "Failed to read ServerKey magic");
-        goto fail;
+        derp_tls_abort(c, sock);
+        return ESP_FAIL;
     }
 
     if (memcmp(magic, DERP_MAGIC, 8) != 0) {
         ESP_LOGE(TAG, "Invalid DERP magic: %02x%02x%02x%02x%02x%02x%02x%02x",
                  magic[0], magic[1], magic[2], magic[3],
                  magic[4], magic[5], magic[6], magic[7]);
-        goto fail;
+        derp_tls_abort(c, sock);
+        return ESP_FAIL;
     }
-    ESP_LOGI(TAG, "DERP magic verified");
+    ESP_LOGD(TAG, "DERP magic verified");
 
     /* Read 32-byte server public key */
     uint8_t derp_server_key[32];
     if (derp_tls_read_all(c, derp_server_key, 32, DERP_CONNECT_TIMEOUT_MS) < 0) {
         ESP_LOGE(TAG, "Failed to read server key");
-        goto fail;
+        derp_tls_abort(c, sock);
+        return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "DERP server key received (first 8): %02x%02x%02x%02x%02x%02x%02x%02x",
+    ESP_LOGD(TAG, "DERP server key received (first 8): %02x%02x%02x%02x%02x%02x%02x%02x",
              derp_server_key[0], derp_server_key[1], derp_server_key[2], derp_server_key[3],
              derp_server_key[4], derp_server_key[5], derp_server_key[6], derp_server_key[7]);
 
@@ -1113,7 +1375,8 @@ static esp_err_t derp_conn_open(microlink_t *ml, ml_derp_conn_t *c, uint16_t reg
         size_t ciphertext_len = json_len + NACL_BOX_MACBYTES;
         uint8_t *ciphertext = malloc(ciphertext_len);
         if (!ciphertext) {
-            goto fail;
+            derp_tls_abort(c, sock);
+            return ESP_FAIL;
         }
 
         if (nacl_box(ciphertext,
@@ -1124,7 +1387,8 @@ static esp_err_t derp_conn_open(microlink_t *ml, ml_derp_conn_t *c, uint16_t reg
                      ) != 0) {
             ESP_LOGE(TAG, "NaCl box encrypt failed");
             free(ciphertext);
-            goto fail;
+            derp_tls_abort(c, sock);
+            return ESP_FAIL;
         }
 
         /* Build ClientInfo frame payload: nodekey(32) + nonce(24) + ciphertext */
@@ -1132,7 +1396,8 @@ static esp_err_t derp_conn_open(microlink_t *ml, ml_derp_conn_t *c, uint16_t reg
         uint8_t *ci_payload = malloc(ci_payload_len);
         if (!ci_payload) {
             free(ciphertext);
-            goto fail;
+            derp_tls_abort(c, sock);
+            return ESP_FAIL;
         }
 
         memcpy(ci_payload, ml->wg_public_key, 32);
@@ -1140,7 +1405,7 @@ static esp_err_t derp_conn_open(microlink_t *ml, ml_derp_conn_t *c, uint16_t reg
         memcpy(ci_payload + 32 + NACL_BOX_NONCEBYTES, ciphertext, ciphertext_len);
         free(ciphertext);
 
-        ESP_LOGI(TAG, "DERP ClientInfo node_key=%02x%02x%02x%02x%02x%02x%02x%02x",
+        ESP_LOGD(TAG, "DERP ClientInfo node_key=%02x%02x%02x%02x%02x%02x%02x%02x",
                  ml->wg_public_key[0], ml->wg_public_key[1],
                  ml->wg_public_key[2], ml->wg_public_key[3],
                  ml->wg_public_key[4], ml->wg_public_key[5],
@@ -1150,11 +1415,12 @@ static esp_err_t derp_conn_open(microlink_t *ml, ml_derp_conn_t *c, uint16_t reg
         if (derp_write_frame(c, DERP_FRAME_CLIENT_INFO, ci_payload, ci_payload_len) < 0) {
             ESP_LOGE(TAG, "Failed to send ClientInfo");
             free(ci_payload);
-            goto fail;
+            derp_tls_abort(c, sock);
+            return ESP_FAIL;
         }
         free(ci_payload);
 
-        ESP_LOGI(TAG, "ClientInfo sent");
+        ESP_LOGD(TAG, "ClientInfo sent");
     }
 
     /* Step 3: Read ServerInfo frame (type 0x03) */
@@ -1169,7 +1435,7 @@ static esp_err_t derp_conn_open(microlink_t *ml, ml_derp_conn_t *c, uint16_t reg
                 derp_tls_read_all(c, si_buf, si_len, DERP_CONNECT_TIMEOUT_MS);
                 free(si_buf);
             }
-            ESP_LOGI(TAG, "ServerInfo received (discarded)");
+            ESP_LOGD(TAG, "ServerInfo received (discarded)");
         } else if (err != ESP_OK) {
             ESP_LOGW(TAG, "No ServerInfo frame (continuing anyway)");
         }
@@ -1183,41 +1449,33 @@ static esp_err_t derp_conn_open(microlink_t *ml, ml_derp_conn_t *c, uint16_t reg
     }
 
     /* Switch socket to short timeout for data phase.
-     * Long timeout was needed for TLS handshake, but polling must be fast. */
+     * Long timeout was needed for TLS handshake, but polling must be fast.
+     * conf_read_timeout is deliberately not called: recv uses the f_recv
+     * (blocking) scheme, so only SO_RCVTIMEO takes effect (with
+     * f_recv_timeout unused, conf_read_timeout would be a no-op; same
+     * policy as the TLS 1.3 Bad input data workaround). */
     {
         struct timeval tv = { .tv_sec = 0, .tv_usec = 200000 };  /* 200ms */
         ml_setsockopt(c->sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-        mbedtls_ssl_conf_read_timeout(&c->ssl_conf, 200);
     }
 
     c->connected = true;
     c->last_recv_ms = ml_get_time_ms();
     c->last_used_ms = c->last_recv_ms;
-    c->region = region;
+    c->region = derp_region_used;
     if (home) {
         xEventGroupSetBits(ml->events, ML_EVT_DERP_CONNECTED);
     }
 
     int64_t t_derp_done = esp_timer_get_time();
-    ESP_LOGI(TAG, "[TIMING] DERP total: %lld ms (DNS=%lld, TCP=%lld, TLS=%lld, proto=%lld)",
-             (t_derp_done - t_derp_start) / 1000,
-             (t_derp_dns - t_derp_start) / 1000,
-             (t_derp_tcp - t_derp_dns) / 1000,
-             (t_derp_tls - t_derp_tcp) / 1000,
-             (t_derp_done - t_derp_tls) / 1000);
-    ESP_LOGI(TAG, "DERP handshake complete, connected (region %d)", region);
+    ESP_LOGI(TAG, "[TIMING] DERP total: %ld ms (DNS=%ld, TCP=%ld, TLS=%ld, proto=%ld)",
+             (long)((t_derp_done - t_derp_start) / 1000),
+             (long)((t_derp_dns - t_derp_start) / 1000),
+             (long)((t_derp_tcp - t_derp_dns) / 1000),
+             (long)((t_derp_tls - t_derp_tcp) / 1000),
+             (long)((t_derp_done - t_derp_tls) / 1000));
+    ESP_LOGI(TAG, "DERP handshake complete, connected (region %d)", derp_region_used);
     return ESP_OK;
-
-fail:
-    /* Every failure after mbedtls_*_init() frees the TLS state as well as the
-     * socket; ml_derp_disconnect() only runs for an established connection. */
-    mbedtls_ssl_free(&c->ssl);
-    mbedtls_ssl_config_free(&c->ssl_conf);
-    mbedtls_ctr_drbg_free(&c->ctr_drbg);
-    mbedtls_entropy_free(&c->entropy);
-    ml_close_sock(sock);
-    c->sockfd = -1;
-    return ESP_FAIL;
 }
 
 esp_err_t ml_derp_connect(microlink_t *ml) {
@@ -1231,8 +1489,10 @@ static void derp_conn_close(ml_derp_conn_t *c) {
         mbedtls_ssl_close_notify(&c->ssl);
         mbedtls_ssl_free(&c->ssl);
         mbedtls_ssl_config_free(&c->ssl_conf);
+#if ML_TLS_LEGACY_RNG
         mbedtls_ctr_drbg_free(&c->ctr_drbg);
         mbedtls_entropy_free(&c->entropy);
+#endif
         ml_close_sock(c->sockfd);
         c->sockfd = -1;
     }
@@ -1241,6 +1501,7 @@ static void derp_conn_close(ml_derp_conn_t *c) {
 void ml_derp_disconnect(microlink_t *ml) {
     ml->derp.connected = false;
     xEventGroupClearBits(ml->events, ML_EVT_DERP_CONNECTED);
+
     derp_conn_close(&ml->derp);
     /* headboard: also close the connections to peers' home regions
      * (they are reopened on demand) */

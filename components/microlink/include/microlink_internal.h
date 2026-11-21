@@ -17,6 +17,7 @@
 
 #include "microlink.h"
 #include "ml_config_httpd.h"
+#include "ml_routes.h"
 #include "sdkconfig.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -24,8 +25,17 @@
 #include "freertos/event_groups.h"
 #include "freertos/semphr.h"
 #include "mbedtls/ssl.h"
+/* mbedTLS 4 (ESP-IDF 6) draws TLS randomness from PSA (ESP-IDF calls
+ * psa_crypto_init() at startup), removed mbedtls_ssl_conf_rng() and made the
+ * entropy and CTR-DRBG modules private. mbedTLS 3 (ESP-IDF 5) still needs an
+ * explicit CTR-DRBG as the TLS RNG. */
+#if MBEDTLS_VERSION_MAJOR < 4
+#define ML_TLS_LEGACY_RNG 1
 #include "mbedtls/entropy.h"
 #include "mbedtls/ctr_drbg.h"
+#else
+#define ML_TLS_LEGACY_RNG 0
+#endif
 #include "esp_heap_caps.h"
 
 #ifdef CONFIG_ML_ZERO_COPY_WG
@@ -43,6 +53,15 @@ extern "C" {
  * ========================================================================== */
 
 /* Task configuration */
+/* Tasks that prefer the second core fall back to Core 0 on single-core
+ * targets (ESP32-C3/C6/H2, or CONFIG_FREERTOS_UNICORE); pinning to Core 1
+ * there fails an assert in xTaskCreatePinnedToCore. */
+#ifdef CONFIG_FREERTOS_UNICORE
+#define ML_TASK_APP_CORE        0
+#else
+#define ML_TASK_APP_CORE        1
+#endif
+
 #define ML_TASK_NET_IO_STACK    (8 * 1024)
 #define ML_TASK_NET_IO_PRIO     7
 #define ML_TASK_NET_IO_CORE     0
@@ -53,11 +72,25 @@ extern "C" {
 
 #define ML_TASK_COORD_STACK     (12 * 1024)
 #define ML_TASK_COORD_PRIO      5
-#define ML_TASK_COORD_CORE      1
+#define ML_TASK_COORD_CORE      ML_TASK_APP_CORE
 
 #define ML_TASK_WG_MGR_STACK    (8 * 1024)
 #define ML_TASK_WG_MGR_PRIO     7
-#define ML_TASK_WG_MGR_CORE     1
+#define ML_TASK_WG_MGR_CORE     ML_TASK_APP_CORE
+
+// Was a bare `configMAX_PRIORITIES - 2` literal at the ml_udp.c call
+// site - numerically identical to ESP-IDF's own ESP_TASK_BT_CONTROLLER_PRIO
+// (esp_task.h), the reserved priority tier for the Bluetooth radio
+// controller's hard-real-time servicing task. There's no radio-timing
+// requirement for draining a 4-deep UDP receive queue into a callback;
+// this priority just needs to beat this project's other MicroLink tasks
+// reliably, matching the ML_TASK_WG_MGR tier rather than colliding with
+// a reserved system-level slot that can starve everything below it
+// (ml_coord's control-plane connection included) for as long as the
+// receive callback runs. Kconfig ML_UDP_RX_TASK_PRIO (default 7, the
+// ML_TASK_WG_MGR tier) lets an application with a heavy receive callback
+// drop it below MicroLink's own tasks.
+#define ML_TASK_UDP_RX_PRIO     CONFIG_ML_UDP_RX_TASK_PRIO
 
 /* Queue depths */
 #define ML_DERP_TX_QUEUE_DEPTH  16
@@ -90,7 +123,11 @@ extern "C" {
 #define ML_DERP_PORT            443
 
 /* Tailscale control plane */
+#ifdef CONFIG_ML_CTRL_HOST
+#define ML_CTRL_HOST            CONFIG_ML_CTRL_HOST
+#else
 #define ML_CTRL_HOST            "controlplane.tailscale.com"
+#endif
 #define ML_CTRL_PORT            443
 #define ML_CTRL_PROTOCOL_VER    131
 
@@ -121,6 +158,12 @@ extern "C" {
 #define ML_CTRL_KEEPALIVE_MS            60000
 
 /* Large tailnet buffer sizes (PSRAM-allocated, configurable via menuconfig) */
+/* Hostinfo.OS reported to the control plane. Kept as "linux": changing it
+ * makes Tailscale flag every upgraded device with "node OS changed since last
+ * connection, was node state copied between devices?", and unknown OS values
+ * may be treated differently by the control plane. OSVersion says ESP-IDF. */
+#define ML_HOSTINFO_OS          "linux"
+
 #define ML_H2_BUFFER_SIZE       (CONFIG_ML_H2_BUFFER_SIZE_KB * 1024)
 #define ML_JSON_BUFFER_SIZE     (CONFIG_ML_JSON_BUFFER_SIZE_KB * 1024)
 
@@ -164,6 +207,8 @@ typedef struct {
 /* Zero-copy state embedded in microlink_s */
 typedef struct {
     struct udp_pcb *pcb;            /* Raw UDP PCB (replaces disco_sock4) */
+    struct udp_pcb *stale_pcb;      /* PCB a failed deinit left registered: never
+                                     * used again, removal retried by the next deinit */
     uint16_t local_port;            /* Bound port */
 
     /* DISCO RX ring buffer (lock-free SPSC) */
@@ -192,6 +237,27 @@ typedef struct {
 #define ML_EVT_SHUTDOWN_REQUEST     BIT6
 #define ML_EVT_DERP_RECONNECT       BIT7
 #define ML_EVT_DERP_CONNECT_REQ     BIT8
+
+/* ============================================================================
+ * Worker Task Liveness
+ *
+ * One bit per task created by microlink_start(). The bit is set before the
+ * task is created and cleared by the task itself, as its very last access to
+ * the context, via ml_task_exit(). microlink_stop() waits for the mask to
+ * reach zero; a zero mask is the proof that nothing can touch ml, its queues
+ * or its event group again, and is what microlink_destroy() gates the free on.
+ *
+ * Kept in a plain atomic word rather than in ml->events: clearing a bit in an
+ * event group runs inside that event group's lock, so the stopping task could
+ * delete the group while the exiting task is still releasing it.
+ * ========================================================================== */
+
+#define ML_TASK_BIT_NET_IO          (1u << 0)
+#define ML_TASK_BIT_DERP_TX         (1u << 1)
+#define ML_TASK_BIT_COORD           (1u << 2)
+#define ML_TASK_BIT_WG_MGR          (1u << 3)
+#define ML_TASK_BIT_ALL             (ML_TASK_BIT_NET_IO | ML_TASK_BIT_DERP_TX | \
+                                     ML_TASK_BIT_COORD  | ML_TASK_BIT_WG_MGR)
 
 /* ============================================================================
  * Queue Message Types
@@ -224,14 +290,25 @@ typedef enum {
     ML_CMD_FORCE_RECONNECT,     /* Force reconnection (after DERP failure, etc.) */
 } ml_coord_cmd_t;
 
-/* Peer update (from coord to wg_mgr) */
+/* Peer update (from coord to wg_mgr), or a request from an application-facing
+ * API (ml_udp.c) that needs the peer table: posting it here runs it on the
+ * wg_mgr task, which owns peers[], instead of on the caller's task. */
 typedef struct {
     enum {
         ML_PEER_ADD,
         ML_PEER_REMOVE,
         ML_PEER_UPDATE_ENDPOINT,
+        ML_PEER_SYNC_DONE,      /* end of a full peer list: drop peers not in it */
+        ML_PEER_REQ_HANDSHAKE,  /* trigger WG handshake + CallMeMaybe to vpn_ip */
+        ML_PEER_REQ_CMM_ALL,    /* paced CallMeMaybe to every active peer */
     } action;
+    int64_t node_id;            /* tailcfg NodeID (0 = unknown) */
+    uint32_t netmap_gen;        /* full-netmap generation (0 = delta update) */
+    bool key_valid;             /* public_key present (patches may omit it) */
+    bool disco_valid;           /* disco_key present (patches may omit it) */
     uint32_t vpn_ip;
+    uint8_t vpn_ip6[16];        /* tailnet IPv6 address, if has_ip6 */
+    bool has_ip6;
     uint8_t public_key[32];
     uint8_t disco_key[32];
     char hostname[64];
@@ -243,6 +320,8 @@ typedef struct {
         bool is_ipv6;
     } endpoints[ML_MAX_ENDPOINTS];
     int endpoint_count;
+    bool online;                /* Node.Online from MapResponse */
+    bool online_valid;          /* false when a patch omitted Online */
 } ml_peer_update_t;
 
 /* ============================================================================
@@ -251,17 +330,34 @@ typedef struct {
 
 typedef struct {
     /* Identity */
+    int64_t node_id;            /* tailcfg NodeID (0 = not yet known, e.g. NVS cache) */
+    uint32_t netmap_gen;        /* last full-netmap generation that listed this peer */
     uint32_t vpn_ip;
+    uint8_t vpn_ip6[16];        /* tailnet IPv6 address, if has_ip6 */
+    bool has_ip6;
+    bool ip6_installed;         /* its /128 is an allowed IP of the WG peer */
     uint8_t public_key[32];
     uint8_t disco_key[32];
     char hostname[64];
-    bool active;
+    bool active;                /* occupies a slot in this table */
+    bool online;                /* control plane last reported it reachable */
 
-    /* Endpoints */
+    /* Endpoints - the per-address ping-tracking equivalent of real
+     * Tailscale's endpointState map (endpoint.go). last_ping_ms mirrors
+     * that struct's lastPing field: 0 means "never pinged", otherwise
+     * checked against ML_DISCO_PING_INTERVAL_MS before sending another
+     * probe to this specific address, unless a caller forces a fresh
+     * round (see disco_ping_round() in ml_wg_mgr.c). Without this, every
+     * trigger (including a received CallMeMaybe) pinged every known
+     * endpoint completely unconditionally, with no per-address memory of
+     * a probe already in flight - real Tailscale's handleCallMeMaybe()
+     * reuses/updates this same per-endpoint state rather than registering
+     * independent anonymous probes per endpoint per call. */
     struct {
         uint32_t ip;
         uint16_t port;
         bool is_ipv6;
+        uint64_t last_ping_ms;
     } endpoints[ML_MAX_ENDPOINTS];
     int endpoint_count;
     uint16_t derp_region;
@@ -277,12 +373,17 @@ typedef struct {
     uint32_t best_ip;
     uint16_t best_port;
     bool has_direct_path;
+    uint32_t best_rtt_ms;           /* RTT of the last pong on best_ip:best_port */
+    uint64_t best_pong_ms;          /* when best_ip:best_port last answered */
+    uint64_t last_full_ping_ms;     /* last round that pinged every endpoint */
 
     /* WireGuard peer index in wireguard-lwip */
     int wg_peer_index;
 
-    /* On-demand handshake: tried once on first DISCO direct path discovery */
-    bool tried_initial_handshake;
+    /* last time a direct DISCO pong kicked a WG
+     * handshake for a peer without a session (rate limit, see
+     * process_disco_pong). */
+    uint64_t last_hs_kick_ms;
 } ml_peer_t;
 
 /* ============================================================================
@@ -336,8 +437,10 @@ typedef struct {
     int sockfd;                     /* Raw TCP socket */
     mbedtls_ssl_context ssl;        /* TLS context (owned exclusively by DERP I/O task) */
     mbedtls_ssl_config ssl_conf;
+#if ML_TLS_LEGACY_RNG
     mbedtls_entropy_context entropy;
     mbedtls_ctr_drbg_context ctr_drbg;
+#endif
     bool connected;
     uint64_t last_recv_ms;          /* For keepalive watchdog */
     /* headboard: secondary ("foreign region") connections, see ml_derp.c */
@@ -349,10 +452,50 @@ typedef struct {
 /* headboard: maximum number of extra DERP connections to peers' home regions.
  * Real Tailscale clients send to a peer through the peer's home DERP region
  * (DERP servers in different regions do not forward to each other). Each
- * connection costs one TLS session in internal RAM, so keep this small. */
+ * connection costs one TLS session, so keep this small. */
 #ifndef ML_DERP_MAX_ALT
 #define ML_DERP_MAX_ALT         1
 #endif
+
+/* ============================================================================
+ * Control Plane TLS State (CONFIG_ML_CTRL_TLS)
+ * ========================================================================== */
+
+typedef struct {
+    mbedtls_ssl_context ssl;        /* Owned exclusively by coord task */
+    mbedtls_ssl_config ssl_conf;
+#if ML_TLS_LEGACY_RNG
+    mbedtls_entropy_context entropy;
+    mbedtls_ctr_drbg_context ctr_drbg;
+#endif
+    int sockfd;                     /* Copy of coord_sock for the BIO callbacks */
+    bool active;                    /* TLS session established */
+} ml_coord_tls_t;
+
+/* ============================================================================
+ * Coordination connection state (ml_coord.c, coord task only)
+ *
+ * Kept per instance, not as file statics: a coord task left running after a
+ * stop timeout (an orphaned context) must not free or write buffers that a
+ * newer instance's coord task is using.
+ * ========================================================================== */
+
+typedef struct {
+    /* Long-poll stream reassembly */
+    struct {
+        uint8_t *h2;   size_t h2_len,  h2_cap;    /* undecoded H2 bytes */
+        uint8_t *msg;  size_t msg_len, msg_cap;   /* stream-5 payload bytes */
+    } lp;
+    /* Server proactive frames (kept between handshake and H2 preface) */
+    uint8_t *extra_data;
+    int extra_data_len;
+    /* NodeKeyChallenge from EarlyNoise (kept between handshake and register) */
+    uint8_t node_key_challenge[32];
+    bool has_node_key_challenge;
+    /* Receive timeout the coord reads honour; SO_RCVTIMEO is only a slice
+     * of it (see coord_set_rcv_timeout) */
+    uint32_t rcv_timeout_ms;
+} ml_coord_state_t;
 
 /* ============================================================================
  * Main Context
@@ -365,7 +508,8 @@ struct microlink_s {
     /* State (atomic reads from any task, writes only from coord) */
     volatile microlink_state_t state;
     volatile uint32_t vpn_ip;
-    volatile bool auth_error;   /* headboard-led: last RegisterResponse rejected the auth key */
+    uint8_t vpn_ip6[16];                /* our tailnet IPv6 address, if has_vpn_ip6 */
+    volatile bool has_vpn_ip6;
 
     /* Event group (cross-task synchronization) */
     EventGroupHandle_t events;
@@ -376,6 +520,15 @@ struct microlink_s {
     TaskHandle_t coord_task;
     TaskHandle_t wg_mgr_task;
 
+    /* ML_TASK_BIT_* mask of worker tasks still running. Set by
+     * microlink_start() before each create, cleared by the task in
+     * ml_task_exit(). Only accessed with __atomic builtins. */
+    uint32_t tasks_alive;
+
+    /* True from microlink_start() until microlink_stop() has joined every
+     * task and released the per-run resources. */
+    bool started;
+
     /* Queues */
     QueueHandle_t derp_tx_queue;        /* -> derp_tx task */
     QueueHandle_t disco_rx_queue;       /* net_io -> wg_mgr */
@@ -383,6 +536,13 @@ struct microlink_s {
     QueueHandle_t stun_rx_queue;        /* net_io -> coord */
     QueueHandle_t coord_cmd_queue;      /* any -> coord */
     QueueHandle_t peer_update_queue;    /* coord -> wg_mgr */
+
+    /* Idle wakeups (event-driven tasks instead of fixed polling):
+     * wg_wake is given by every producer of wg_mgr's queues; derp_wake_fd is
+     * an eventfd signalled by ml_derp_queue_send() (-1 if unavailable). Both
+     * live as long as the context, so producers can signal them safely. */
+    SemaphoreHandle_t wg_wake;
+    int derp_wake_fd;
 
     /* Keys (loaded at init, read-only after) */
     uint8_t machine_private_key[32];    /* Noise machine key */
@@ -405,6 +565,10 @@ struct microlink_s {
 
     /* Coordination socket (owned exclusively by coord task) */
     int coord_sock;
+#ifdef CONFIG_ML_CTRL_TLS
+    ml_coord_tls_t coord_tls;
+#endif
+    ml_coord_state_t coord_st;          /* Owned exclusively by coord task */
     uint32_t h2_next_stream_id;         /* Next H2 stream ID for endpoint updates (odd, starts at 7) */
 
     /* WireGuard netif (owned exclusively by wg_mgr task) */
@@ -413,6 +577,16 @@ struct microlink_s {
     /* Peers (owned exclusively by wg_mgr task) */
     ml_peer_t peers[ML_MAX_PEERS];
     int peer_count;
+
+    /* VPN IPs of peers with a usable WireGuard session (0 = none), written
+     * only by wg_mgr with atomic stores and read by ml_wg_mgr_peer_is_up()
+     * from any task. Slot i mirrors peers[i]. */
+    uint32_t wg_session_up_ip[ML_MAX_PEERS];
+
+    /* Paced CallMeMaybe sweep requested via ML_PEER_REQ_CMM_ALL (wg_mgr only) */
+    bool cmm_sweep_active;
+    int cmm_sweep_next;
+    uint64_t cmm_sweep_last_ms;
 
     /* STUN results (written by coord, read by coord only) */
     uint32_t stun_public_ip;
@@ -467,9 +641,31 @@ struct microlink_s {
     char nvs_auth_key[96];
     char nvs_device_name[48];
 
+    /* Pending interactive login (empty = none). Written by the coord task
+     * under ml_coord's auth_url lock, read by microlink_get_auth_url(). */
+    char auth_url[MICROLINK_AUTH_URL_MAX];
+
     /* Control plane host override (empty = use ML_CTRL_HOST default).
-     * Set from NVS at boot for Headscale/Ionscale/custom coordinators. */
+     * Set from config struct or NVS at boot for Headscale/Ionscale/custom
+     * coordinators. */
     char ctrl_host[64];
+
+    /* Control plane Noise public key override (from config struct;
+     * ctrl_noise_pubkey_set false = use CONFIG_ML_CTRL_NOISE_PUBKEY_HEX
+     * or the built-in Tailscale key) */
+    uint8_t ctrl_noise_pubkey[32];
+    bool ctrl_noise_pubkey_set;
+
+    /* Advertised subnet routes (Hostinfo.RoutableIPs), parsed at init */
+    ml_route_t routes[ML_MAX_ROUTES];
+    uint8_t route_count;
+    ml_route6_t routes6[ML_MAX_ROUTES];   /* advertised IPv6 prefixes */
+    uint8_t route6_count;
+    /* VPN IP last pushed to ml_filter_set_local() (0 = not yet). Per
+     * context, so a re-created instance always pushes it again (ml_filter
+     * is reset in microlink_destroy). */
+    uint32_t filter_local_ip;
+    bool filter_local_ip6;              /* has_vpn_ip6 when last pushed */
 
     /* Debug flags (bitmask from NVS, checked at runtime for verbose logging) */
     uint8_t debug_flags;  /* bit 0: DISCO, bit 1: WG, bit 2: DERP, bit 3: coord */
@@ -483,6 +679,39 @@ struct microlink_s {
 /* ============================================================================
  * Internal Function Declarations (per-module)
  * ========================================================================== */
+
+/* microlink.c - worker task lifecycle */
+
+/** ML_TASK_BIT_* mask of worker tasks still running (0 = all exited). */
+uint32_t ml_tasks_alive(const microlink_t *ml);
+
+/** Debug trace of free internal RAM at a teardown step (ESP_LOGD under the
+ *  "ml_heap" tag; enable with esp_log_level_set("ml_heap", ESP_LOG_DEBUG) on
+ *  a build with CONFIG_LOG_MAXIMUM_LEVEL >= DEBUG). */
+#define ML_HEAP_TRACE(step) \
+    ESP_LOGD("ml_heap", "%-28s internal=%u psram=%u", (step), \
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL), \
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM))
+
+/** True once microlink_stop() has requested shutdown. Long-running loops and
+ *  retry/backoff paths check this so stop does not have to wait out a full
+ *  network timeout. */
+bool ml_shutdown_requested(const microlink_t *ml);
+
+/** Terminate the calling worker task: clears its task handle and liveness bit,
+ *  then deletes the task. Never returns. The context must not be touched after
+ *  this call; clearing the bit is what allows microlink_destroy() to free it. */
+void ml_task_exit(microlink_t *ml, uint32_t task_bit) __attribute__((noreturn));
+
+/* ml_ota.c: firmware rollback guard (no-ops without CONFIG_ML_OTA_ROLLBACK) */
+void ml_ota_check_pending(void);   /* at start: arm the rollback timer */
+void ml_ota_confirm(void);         /* on CONNECTED: keep the new firmware */
+
+/* IPv4 address (host byte order) of the LAN interface (WiFi station or
+ * Ethernet, never cellular PPP) that peers on the same network can reach
+ * directly: the default interface if it is one, else the first that is up.
+ * Advertised as the "Local" endpoint. False if there is none. */
+bool ml_lan_ipv4(uint32_t *ip_out);
 
 /* ml_net_io.c */
 void ml_net_io_task(void *arg);
@@ -499,9 +728,19 @@ void ml_coord_task(void *arg);
 
 /* ml_wg_mgr.c */
 void ml_wg_mgr_task(void *arg);
-void ml_wg_mgr_send_cmm(microlink_t *ml, uint32_t peer_vpn_ip);
-esp_err_t ml_wg_mgr_trigger_handshake(microlink_t *ml, uint32_t dest_vpn_ip);
+
+/* Wake the wg_mgr task after queueing work for it (safe from any task). */
+static inline void ml_wg_mgr_wake(microlink_t *ml) {
+    if (ml && ml->wg_wake) xSemaphoreGive(ml->wg_wake);
+}
+/* True if wg_mgr last saw a usable WireGuard session to vpn_ip. Reads the
+ * table wg_mgr publishes (wg_session_up_ip), so it is safe from any task;
+ * the answer may be up to ~100 ms old. */
 bool ml_wg_mgr_peer_is_up(microlink_t *ml, uint32_t vpn_ip);
+/* Queue ML_PEER_REQ_HANDSHAKE / ML_PEER_REQ_CMM_ALL for the wg_mgr task.
+ * Non-blocking and safe from any task. Application-facing code must use
+ * this rather than touching peers[] or WireGuard state itself. */
+esp_err_t ml_wg_mgr_post_request(microlink_t *ml, int action, uint32_t vpn_ip);
 void ml_wg_mgr_update_transport(microlink_t *ml);
 
 /* ml_stun.c */
@@ -513,6 +752,15 @@ bool ml_stun_parse_response(const uint8_t *data, size_t len,
                              uint32_t *out_ip, uint16_t *out_port);
 bool ml_stun_parse_response_ipv6(const uint8_t *data, size_t len,
                                   uint8_t *out_ip6, uint16_t *out_port);
+
+/* ml_coord_tls.c (CONFIG_ML_CTRL_TLS) */
+#ifdef CONFIG_ML_CTRL_TLS
+int ml_coord_tls_handshake(microlink_t *ml, const char *hostname);
+int ml_coord_tls_send(microlink_t *ml, const uint8_t *data, size_t len);
+int ml_coord_tls_recv(microlink_t *ml, uint8_t *buf, size_t len);
+size_t ml_coord_tls_pending(microlink_t *ml);
+void ml_coord_tls_free(microlink_t *ml);
+#endif
 
 /* ml_noise.c */
 void ml_noise_init(ml_noise_state_t *state,
@@ -548,11 +796,20 @@ void ml_peer_nvs_deinit(void);
 esp_err_t ml_peer_nvs_save(const ml_peer_t *peer);
 int ml_peer_nvs_load_all(ml_peer_t *peers, int max_peers);
 esp_err_t ml_peer_nvs_clear(void);
+esp_err_t ml_peer_nvs_remove(const uint8_t *public_key);
+/* Defer the flash writes of saves/removes until the matching batch_end()
+ * (nestable), so a batch costs at most one write. wg_mgr task only. */
+void ml_peer_nvs_batch_begin(void);
+void ml_peer_nvs_batch_end(void);
 
 #ifdef CONFIG_ML_ZERO_COPY_WG
 /* ml_zerocopy.c */
 esp_err_t ml_zerocopy_init(microlink_t *ml);
-void ml_zerocopy_deinit(microlink_t *ml);
+/* ESP_FAIL if tcpip_thread could not be reached: the PCB is then still
+ * registered (its callback detached from ml, parked in zc.stale_pcb so
+ * nothing sends on it and the BSD socket fallback is used), and the caller
+ * must not free state reachable from it. A later call retries. */
+esp_err_t ml_zerocopy_deinit(microlink_t *ml);
 esp_err_t ml_zerocopy_send(microlink_t *ml, const uint8_t *data, size_t len,
                             uint32_t dest_ip, uint16_t dest_port);
 #endif

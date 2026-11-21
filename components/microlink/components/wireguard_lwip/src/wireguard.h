@@ -70,6 +70,19 @@
 #define REJECT_AFTER_TIME			(180)
 #define REKEY_TIMEOUT				(5)
 #define KEEPALIVE_TIMEOUT			(10)
+// Matches WireGuard/wireguard-go's device/timers.go RekeyAttemptTime /
+// MaxTimerHandshakes. Without this cap, a peer with active=true but no
+// established session (unreachable, or has trimmed us from its allowed-peer
+// list) gets a handshake initiation retried forever at REKEY_TIMEOUT
+// cadence - harmless on a desktop/server, but a real per-attempt crypto
+// cost (X25519 + a full handshake message build) on a constrained
+// embedded target, indefinitely, for a peer that may never come back.
+// Found via a real production incident: a peer with no known direct
+// endpoint (routed over DERP, ip left as 0.0.0.0) retried every 5s
+// indefinitely once wireguardif_connect_derp()/wireguardif_connect() set
+// it active, with nothing in this file or its caller ever bounding it.
+#define REKEY_ATTEMPT_TIME			(90)
+#define MAX_TIMER_HANDSHAKES		((REKEY_ATTEMPT_TIME) / (REKEY_TIMEOUT) - 1)
 
 // DERP relay output callback for peers without direct endpoints
 // peer_public_key: 32-byte public key to identify the destination peer
@@ -85,6 +98,13 @@ typedef err_t (*wireguard_derp_output_fn)(const uint8_t *peer_public_key, const 
 // len: length of data
 // Returns: ERR_OK on success, error code on failure
 typedef err_t (*wireguard_udp_output_fn)(uint32_t dest_ip, uint16_t dest_port, const uint8_t *data, size_t len, void *ctx);
+/* Same thing, but handed the encrypted pbuf itself. The byte-buffer form above
+ * forces a mem_malloc and a linearising copy here, and typically a second
+ * pbuf_alloc and copy inside the integrator's sender - two allocations and two
+ * ~1.3 KB copies per packet, all of it on the TCPIP thread. The encrypted pbuf
+ * is already PBUF_TRANSPORT with room for the UDP/IP headers, so udp_sendto()
+ * can take it as-is. */
+typedef err_t (*wireguard_udp_output_pbuf_fn)(uint32_t dest_ip, uint16_t dest_port, struct pbuf *q, void *ctx);
 
 struct wireguard_keypair {
 	bool valid;
@@ -101,7 +121,7 @@ struct wireguard_keypair {
 	uint32_t last_tx;
 	uint32_t last_rx;
 
-	uint32_t replay_bitmap;
+	uint64_t replay_bitmap;
 	uint64_t replay_counter;
 
 	uint32_t local_index; // This is the index we generated for our end
@@ -180,7 +200,17 @@ struct wireguard_peer {
 
 	// We set this flag on RX/TX of packets if we think that we should initiate a new handshake
 	bool send_handshake;
+
+	// Count of consecutive handshake initiations sent since the last completed
+	// session (or since active connect was requested), for the MAX_TIMER_HANDSHAKES
+	// give-up cap - see REKEY_ATTEMPT_TIME above.
+	uint16_t handshake_attempts;
 };
+
+/* Inbound packet filter: return true to deliver. */
+typedef bool (*wireguard_ip_filter_fn)(void *ctx, const uint8_t *pkt, size_t len);
+/* Outbound packet observer (sees at most the first 28 bytes). */
+typedef void (*wireguard_ip_note_fn)(void *ctx, const uint8_t *pkt, size_t len);
 
 struct wireguard_device {
 	// Maybe have a "Device private" member to abstract these?
@@ -207,9 +237,18 @@ struct wireguard_device {
 	// UDP output callback for magicsock mode (external unified socket)
 	wireguard_udp_output_fn udp_output_fn;
 	void *udp_output_ctx;
+	wireguard_udp_output_pbuf_fn udp_output_pbuf_fn;
+	void *udp_output_pbuf_ctx;
 
 	// Force all peer output through DERP relay (cellular mode)
 	bool force_derp_output;
+
+	// Optional IP packet filter (e.g. tailnet ACLs): rx_filter_fn decides
+	// whether a decrypted inbound packet is delivered; tx_note_fn sees the
+	// start (up to 28 bytes) of every outbound packet. Set once at init.
+	wireguard_ip_filter_fn rx_filter_fn;
+	wireguard_ip_note_fn tx_note_fn;
+	void *filter_ctx;
 
 	bool valid;
 };
@@ -300,11 +339,9 @@ bool wireguard_check_mac2(struct wireguard_device *device, const uint8_t *data, 
 
 bool wireguard_expired(uint32_t created_millis, uint32_t valid_seconds);
 
-void wireguard_encrypt_packet(uint8_t *dst, const uint8_t *src, size_t src_len, struct wireguard_keypair *keypair);
 bool wireguard_decrypt_packet(uint8_t *dst, const uint8_t *src, size_t src_len, uint64_t counter, struct wireguard_keypair *keypair);
 
 bool wireguard_base64_decode(const char *str, uint8_t *out, size_t *outlen);
-bool wireguard_base64_encode(const uint8_t *in, size_t inlen, char *out, size_t *outlen);
 
 
 #endif /* _WIREGUARD_H_ */

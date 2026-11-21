@@ -14,6 +14,7 @@
 #ifdef CONFIG_ML_ENABLE_CONFIG_HTTPD
 
 #include "ml_config_httpd.h"
+#include "ml_at_validate.h"
 #include "microlink.h"
 #include "microlink_internal.h"
 #include "esp_log.h"
@@ -22,10 +23,13 @@
 #include "esp_heap_caps.h"
 #include "esp_wifi.h"
 #include "esp_timer.h"
+#include "esp_netif.h"
 #include "driver/temperature_sensor.h"
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "cJSON.h"
+#include "esp_app_desc.h"
+#include "esp_ota_ops.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include <string.h>
@@ -79,11 +83,87 @@ struct ml_config_ctx {
 
 static void config_save_peers(ml_config_ctx_t *ctx);  /* forward decl for migration */
 
+/* Fields that end up in modem AT commands (APN, PIN, PPP credentials) or in
+ * the control-plane connection / AT DNS lookup (ctrl_host) must never hold
+ * '"', CR/LF or other characters outside their grammar. These checks are
+ * shared by the web API (reject with 400) and the NVS loaders (drop the
+ * value, fall back to Kconfig). Returns NULL if valid, else a message. */
+#define FIELD_MAX(f) (sizeof(((ml_config_settings_t *)0)->f) - 1)
+
+static const char *check_cellular_apn(const char *v) {
+    return ml_at_param_valid(ML_AT_PARAM_APN, v, FIELD_MAX(cellular_apn)) ? NULL :
+        "cellular_apn: letters, digits, '-' and '.' only (max 31)";
+}
+static const char *check_ppp_user(const char *v) {
+    return ml_at_param_valid(ML_AT_PARAM_CREDENTIAL, v, FIELD_MAX(ppp_user)) ? NULL :
+        "ppp_user: printable ASCII without '\"' or '\\' (max 31)";
+}
+static const char *check_ppp_pass(const char *v) {
+    return ml_at_param_valid(ML_AT_PARAM_CREDENTIAL, v, FIELD_MAX(ppp_pass)) ? NULL :
+        "ppp_pass: printable ASCII without '\"' or '\\' (max 31)";
+}
+static const char *check_ctrl_host(const char *v) {
+    return (v[0] == '\0' || ml_at_param_valid(ML_AT_PARAM_HOSTNAME, v, FIELD_MAX(ctrl_host))) ? NULL :
+        "ctrl_host: host name of letters, digits, '-' and '.' (max 63)";
+}
+
+/* NVS blobs from older firmware (or corrupt ones) are not guaranteed to be
+ * NUL-terminated: force a terminator on every string field after loading,
+ * before anything prints or copies them. */
+#define TERMINATE(field) ((field)[sizeof(field) - 1] = '\0')
+
+static void terminate_settings_strings(ml_config_settings_t *st) {
+    TERMINATE(st->wifi_ssid);
+    TERMINATE(st->wifi_pass);
+    TERMINATE(st->auth_key);
+    TERMINATE(st->device_prefix);
+    TERMINATE(st->cellular_apn);
+    TERMINATE(st->cellular_sim_pin);
+    TERMINATE(st->ctrl_host);
+    TERMINATE(st->device_name_full);
+    TERMINATE(st->ppp_user);
+    TERMINATE(st->ppp_pass);
+}
+
+static void terminate_wifi_list_strings(ml_config_wifi_list_t *list) {
+    for (int i = 0; i < ML_CONFIG_MAX_WIFI_ENTRIES; i++) {
+        TERMINATE(list->entries[i].ssid);
+        TERMINATE(list->entries[i].pass);
+    }
+}
+
+static void terminate_peer_labels(ml_config_peer_list_t *list) {
+    for (int i = 0; i < ML_CONFIG_MAX_ALLOWED_PEERS; i++) {
+        TERMINATE(list->entries[i].label);
+    }
+}
+
+/* Settings blobs from older firmware were stored without validation:
+ * clear any invalid field. */
+static void config_sanitize_settings(ml_config_settings_t *st) {
+    #define SANITIZE(field, check) do { \
+        (field)[sizeof(field) - 1] = '\0'; \
+        if ((check)(field) != NULL) { \
+            ESP_LOGW(TAG, "Ignoring invalid saved %s (re-enter it in the web UI)", #field); \
+            memset((field), 0, sizeof(field)); \
+        } \
+    } while (0)
+    SANITIZE(st->cellular_apn, check_cellular_apn);
+    /* cellular_sim_pin is no longer used (nothing ever read it): drop any
+     * PIN an older firmware stored, so it is wiped on the next save. */
+    memset(st->cellular_sim_pin, 0, sizeof(st->cellular_sim_pin));
+    SANITIZE(st->ppp_user, check_ppp_user);
+    SANITIZE(st->ppp_pass, check_ppp_pass);
+    SANITIZE(st->ctrl_host, check_ctrl_host);
+    #undef SANITIZE
+}
+
 static void config_load_settings(ml_config_ctx_t *ctx) {
     /* Read whatever size blob exists — v1 blobs are smaller than v2 struct */
     memset(&ctx->settings, 0, sizeof(ml_config_settings_t));
     size_t len = sizeof(ml_config_settings_t);
     esp_err_t err = nvs_get_blob(ctx->nvs, NVS_KEY_SETTINGS, &ctx->settings, &len);
+    terminate_settings_strings(&ctx->settings);
 
     if (err == ESP_OK && ctx->settings.version >= 1) {
         /* v1 blob is smaller — v2 fields will be zero (defaults) */
@@ -120,6 +200,8 @@ static void config_load_settings(ml_config_ctx_t *ctx) {
     }
 
     #undef SEED_STR
+
+    config_sanitize_settings(&ctx->settings);
 
     ESP_LOGI(TAG, "Settings v%d (wifi=%s, prefix=%s, name=%s, max_peers=%d, ctrl=%s, pip=%s)",
              ctx->settings.version,
@@ -163,8 +245,10 @@ static void config_load_peers(ml_config_ctx_t *ctx) {
                 size_t rlen = stored_len;
                 err = nvs_get_blob(ctx->nvs, NVS_KEY_PEERS, tmp, &rlen);
                 if (err == ESP_OK) {
-                    uint8_t old_count = tmp[0];
-                    uint16_t count = (old_count <= ML_CONFIG_MAX_ALLOWED_PEERS) ? old_count : 0;
+                    /* uint16_t so the bound check is not "always true" when
+                     * the limit exceeds 255 (-Wtype-limits, GCC 15) */
+                    uint16_t count = tmp[0];
+                    if (count > ML_CONFIG_MAX_ALLOWED_PEERS) count = 0;
                     memset(&ctx->peer_list, 0, sizeof(ctx->peer_list));
                     ctx->peer_list.count = count;
                     if (count > 0) {
@@ -189,6 +273,7 @@ static void config_load_peers(ml_config_ctx_t *ctx) {
             }
         }
 
+        terminate_peer_labels(&ctx->peer_list);
         ctx->filter_enabled = (ctx->peer_list.count > 0);
         ESP_LOGI(TAG, "Peer allowlist loaded: %d peers (filter %s)",
                  ctx->peer_list.count, ctx->filter_enabled ? "ON" : "OFF");
@@ -231,6 +316,7 @@ static void config_load_wifi_list(ml_config_ctx_t *ctx) {
             memset(&ctx->wifi_list, 0, sizeof(ctx->wifi_list));
             ctx->wifi_list.active_idx = 0xFF;
         }
+        terminate_wifi_list_strings(&ctx->wifi_list);
         ESP_LOGI(TAG, "WiFi list loaded: %d entries", ctx->wifi_list.count);
     } else {
         /* No wifi_list key — migrate from settings blob if it has WiFi creds */
@@ -326,6 +412,7 @@ uint32_t ml_config_get_priority_peer_ip(const ml_config_ctx_t *ctx) {
 
 const char *ml_config_get_ctrl_host(const ml_config_ctx_t *ctx) {
     if (!ctx || ctx->settings.ctrl_host[0] == '\0') return NULL;
+    if (check_ctrl_host(ctx->settings.ctrl_host) != NULL) return NULL;
     return ctx->settings.ctrl_host;
 }
 
@@ -336,6 +423,263 @@ uint8_t ml_config_get_debug_flags(const ml_config_ctx_t *ctx) {
 const char *ml_config_get_device_name_full(const ml_config_ctx_t *ctx) {
     if (!ctx || ctx->settings.device_name_full[0] == '\0') return NULL;
     return ctx->settings.device_name_full;
+}
+
+/* ============================================================================
+ * Access control
+ *
+ * The config server can change the auth key, WiFi list, APN credentials and
+ * control host, so every endpoint requires:
+ *   1. the request arrived on an allowed address: the device's own tailnet
+ *      (VPN) IP, plus the WiFi station / Ethernet address with
+ *      CONFIG_ML_CONFIG_HTTPD_ALLOW_LAN. Never the cellular carrier-facing
+ *      (PPP) address.
+ *   2. HTTP Basic auth with the admin password (CONFIG_ML_CONFIG_HTTPD_PASSWORD,
+ *      or a random one generated on first start, stored in NVS and printed
+ *      once on the serial console).
+ *   3. a Host header that is an IP literal naming the local address the
+ *      request arrived on (blocks DNS rebinding).
+ *   4. for state-changing requests, Content-Type: application/json
+ *      (cross-site pages can't send it without a CORS preflight, which this
+ *      server never approves -> blocks CSRF).
+ * ========================================================================== */
+#include "mbedtls/base64.h"
+#include "lwip/sockets.h"
+#include "esp_random.h"
+
+#define HTTP_PW_KEY      "http_pw"
+#define HTTP_PW_MAXLEN   64
+
+static char s_http_pw[HTTP_PW_MAXLEN + 1];
+
+static void http_pw_init(void) {
+#ifdef CONFIG_ML_CONFIG_HTTPD_PASSWORD
+    const char *cfg = CONFIG_ML_CONFIG_HTTPD_PASSWORD;
+#else
+    const char *cfg = "";
+#endif
+    if (cfg[0] != '\0') {
+        strlcpy(s_http_pw, cfg, sizeof(s_http_pw));
+        return;
+    }
+    nvs_handle_t h;
+    size_t len = sizeof(s_http_pw);
+    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) == ESP_OK) {
+        if (nvs_get_str(h, HTTP_PW_KEY, s_http_pw, &len) != ESP_OK || s_http_pw[0] == '\0') {
+            static const char alphabet[] = "abcdefghjkmnpqrstuvwxyzACDEFGHJKLMNPQRTUVWXY34679";
+            for (int i = 0; i < 16; i++) {
+                s_http_pw[i] = alphabet[esp_random() % (sizeof(alphabet) - 1)];
+            }
+            s_http_pw[16] = '\0';
+            nvs_set_str(h, HTTP_PW_KEY, s_http_pw);
+            nvs_commit(h);
+            ESP_LOGW(TAG, "Config UI password generated (user 'admin'): %s", s_http_pw);
+        }
+        nvs_close(h);
+    }
+    if (s_http_pw[0] == '\0') {
+        /* NVS unavailable: fail closed with an unguessable password. */
+        for (int i = 0; i < 32; i++) s_http_pw[i] = 'a' + (esp_random() % 26);
+        s_http_pw[32] = '\0';
+        ESP_LOGE(TAG, "Config UI: could not store a password; UI is locked");
+    }
+}
+
+static bool ct_equal(const char *a, const char *b) {
+    size_t la = strlen(a), lb = strlen(b);
+    unsigned char diff = (unsigned char)(la != lb);
+    for (size_t i = 0; i < la; i++) {
+        diff |= (unsigned char)(a[i] ^ b[i % (lb ? lb : 1)]);
+    }
+    return diff == 0;
+}
+
+/* The IPv4 address (host byte order) the request arrived on.
+ *
+ * With CONFIG_LWIP_IPV6 (the ESP-IDF default) esp_http_server listens on an
+ * AF_INET6 socket bound to in6addr_any, and lwIP reports connections that
+ * came in over IPv4 as IPv4-mapped IPv6 addresses (::ffff:a.b.c.d). Those
+ * are unwrapped here. Native IPv6 is not accepted: MicroLink only assigns
+ * the device an IPv4 tailnet address (no fd7a:115c:a1e0::/48 address is
+ * configured on the WireGuard netif), so a native IPv6 connection can only
+ * have come in over a LAN or carrier interface. */
+static bool request_local_ipv4(httpd_req_t *req, uint32_t *ip_out) {
+    int fd = httpd_req_to_sockfd(req);
+    struct sockaddr_storage ss;
+    socklen_t sl = sizeof(ss);
+    if (getsockname(fd, (struct sockaddr *)&ss, &sl) != 0) {
+        return false;
+    }
+    if (ss.ss_family == AF_INET) {
+        *ip_out = ntohl(((struct sockaddr_in *)&ss)->sin_addr.s_addr);
+        return true;
+    }
+#if LWIP_IPV6
+    if (ss.ss_family == AF_INET6) {
+        const uint8_t *a = (const uint8_t *)&((struct sockaddr_in6 *)&ss)->sin6_addr;
+        static const uint8_t v4mapped_prefix[12] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff };
+        if (memcmp(a, v4mapped_prefix, sizeof(v4mapped_prefix)) != 0) {
+            return false;
+        }
+        *ip_out = ((uint32_t)a[12] << 24) | ((uint32_t)a[13] << 16) |
+                  ((uint32_t)a[14] << 8) | (uint32_t)a[15];
+        return true;
+    }
+#endif
+    return false;
+}
+
+#if CONFIG_ML_CONFIG_HTTPD_ALLOW_LAN
+/* esp_netif_find_if() predicate (runs in the lwIP context): a WiFi station
+ * or Ethernet interface whose own address is *arg (network byte order).
+ * The PPP (cellular carrier) interface never matches. */
+static bool lan_netif_has_ip(esp_netif_t *netif, void *arg) {
+    const uint32_t want = *(const uint32_t *)arg;
+    if (esp_netif_get_flags(netif) & ESP_NETIF_FLAG_IS_PPP) return false;
+    const char *key = esp_netif_get_ifkey(netif);
+    const char *desc = esp_netif_get_desc(netif);
+    bool lan = (key && (strncmp(key, "WIFI_STA", 8) == 0 || strncmp(key, "ETH", 3) == 0)) ||
+               (desc && (strcmp(desc, "sta") == 0 || strncmp(desc, "eth", 3) == 0));
+    if (!lan || !esp_netif_is_netif_up(netif)) return false;
+    esp_netif_ip_info_t info;
+    if (esp_netif_get_ip_info(netif, &info) != ESP_OK) return false;
+    return info.ip.addr != 0 && info.ip.addr == want;
+}
+#endif
+
+/* The request must have arrived on the device's own tailnet address (the
+ * VPN IP assigned by the control plane) or, with ALLOW_LAN, on the WiFi
+ * station / Ethernet interface's own address. Address ranges are not used:
+ * 100.64.0.0/10 is also carrier-grade NAT space and 10/8 is a common
+ * carrier PPP range, so a range check would serve the UI on the cellular
+ * carrier side. @p ml may be NULL (MicroLink stopped: no tailnet address).
+ * On success *ip_out is the local IPv4 address (host byte order). */
+static bool local_addr_allowed(httpd_req_t *req, const microlink_t *ml, uint32_t *ip_out) {
+    uint32_t ip;
+    if (!request_local_ipv4(req, &ip) || ip == 0) {
+        return false;
+    }
+    *ip_out = ip;
+    uint32_t vpn_ip = ml ? microlink_get_vpn_ip(ml) : 0;
+    if (vpn_ip != 0 && ip == vpn_ip) {
+        return true;
+    }
+#if CONFIG_ML_CONFIG_HTTPD_ALLOW_LAN
+    uint32_t ip_be = htonl(ip);
+    return esp_netif_find_if(lan_netif_has_ip, &ip_be) != NULL;
+#else
+    return false;
+#endif
+}
+
+/* Optional ":port" suffix of a Host header: 1-5 digits, <= 65535. */
+static bool host_port_ok(const char *p) {
+    if (!p) return true;
+    unsigned long v = 0;
+    int n = 0;
+    for (; *p; p++, n++) {
+        if (*p < '0' || *p > '9' || n >= 5) return false;
+        v = v * 10 + (unsigned long)(*p - '0');
+    }
+    return n > 0 && v <= 65535;
+}
+
+/* DNS-rebinding defence: the Host header must be an IP literal (IPv4, or
+ * "[...]" IPv6), with an optional port, naming the address the request
+ * arrived on (@p local_ip, host byte order). A character-class check is
+ * not enough: names such as "deadbeef.cafe" are made of hex digits only. */
+static bool host_is_local_ip_literal(httpd_req_t *req, uint32_t local_ip) {
+    char host[64];
+    if (httpd_req_get_hdr_value_str(req, "Host", host, sizeof(host)) != ESP_OK) {
+        return false;
+    }
+    if (host[0] == '[') {
+#if LWIP_IPV6
+        char *close = strchr(host, ']');
+        if (!close) return false;
+        *close = '\0';
+        if (close[1] != '\0' && close[1] != ':') return false;
+        if (!host_port_ok(close[1] == ':' ? close + 2 : NULL)) return false;
+        struct in6_addr a6;
+        if (inet_pton(AF_INET6, host + 1, &a6) != 1) return false;
+        /* Only an IPv4-mapped form of the local address can match */
+        static const uint8_t v4mapped_prefix[12] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff };
+        const uint8_t *b6 = a6.un.u8_addr;
+        if (memcmp(b6, v4mapped_prefix, sizeof(v4mapped_prefix)) != 0) return false;
+        uint32_t ip = ((uint32_t)b6[12] << 24) | ((uint32_t)b6[13] << 16) |
+                      ((uint32_t)b6[14] << 8) | (uint32_t)b6[15];
+        return ip == local_ip;
+#else
+        return false;
+#endif
+    }
+    char *colon = strchr(host, ':');
+    if (colon) {
+        *colon = '\0';
+        if (!host_port_ok(colon + 1)) return false;
+    }
+    struct in_addr a4;
+    if (inet_pton(AF_INET, host, &a4) != 1) return false;
+    return ntohl(a4.s_addr) == local_ip;
+}
+
+static bool basic_auth_ok(httpd_req_t *req) {
+    char hdr[160];
+    if (httpd_req_get_hdr_value_str(req, "Authorization", hdr, sizeof(hdr)) != ESP_OK ||
+        strncmp(hdr, "Basic ", 6) != 0) {
+        return false;
+    }
+    unsigned char dec[128];
+    size_t dlen = 0;
+    if (mbedtls_base64_decode(dec, sizeof(dec) - 1, &dlen,
+                              (const unsigned char *)hdr + 6, strlen(hdr + 6)) != 0) {
+        return false;
+    }
+    dec[dlen] = '\0';
+    char *colon = strchr((char *)dec, ':');
+    if (!colon) return false;
+    bool ok = ct_equal(colon + 1, s_http_pw);
+    memset(dec, 0, sizeof(dec));
+    return ok;
+}
+
+/* Returns true if the request may proceed; otherwise a response was sent. */
+/* required_ct: Content-Type a state-changing request must carry (one that
+ * a cross-site page cannot send without a CORS preflight), NULL for reads. */
+static bool http_guard_ct(httpd_req_t *req, const char *required_ct) {
+    const ml_config_ctx_t *ctx = (const ml_config_ctx_t *)req->user_ctx;
+    uint32_t local_ip;
+    if (!local_addr_allowed(req, ctx->ml, &local_ip)) {
+        httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "Not available on this interface");
+        return false;
+    }
+    if (!host_is_local_ip_literal(req, local_ip)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Use the device IP address");
+        return false;
+    }
+    if (!basic_auth_ok(req)) {
+        httpd_resp_set_status(req, "401 Unauthorized");
+        httpd_resp_set_hdr(req, "WWW-Authenticate", "Basic realm=\"MicroLink\", charset=\"UTF-8\"");
+        httpd_resp_sendstr(req, "Authentication required");
+        return false;
+    }
+    if (required_ct) {
+        char ct[48];
+        if (httpd_req_get_hdr_value_str(req, "Content-Type", ct, sizeof(ct)) != ESP_OK ||
+            strncmp(ct, required_ct, strlen(required_ct)) != 0) {
+            char msg[64];
+            snprintf(msg, sizeof(msg), "Content-Type must be %s", required_ct);
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, msg);
+            return false;
+        }
+    }
+    httpd_resp_set_hdr(req, "X-Frame-Options", "DENY");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return true;
+}
+
+static bool http_guard(httpd_req_t *req, bool mutating) {
+    return http_guard_ct(req, mutating ? "application/json" : NULL);
 }
 
 /* ============================================================================
@@ -378,8 +722,21 @@ static char *read_post_body(httpd_req_t *req) {
     return buf;
 }
 
+/* Transport MicroLink's traffic uses: "cellular" over the AT socket bridge
+ * or when the PPP netif is the default interface, else "wifi". (Checking
+ * only the AT bridge reported "wifi" while on cellular PPP.) */
+static const char *active_connection(void) {
+#ifdef CONFIG_ML_ENABLE_CELLULAR
+    if (ml_at_socket_is_ready()) return "cellular";
+#endif
+    esp_netif_t *def = esp_netif_get_default_netif();
+    if (def && (esp_netif_get_flags(def) & ESP_NETIF_FLAG_IS_PPP)) return "cellular";
+    return "wifi";
+}
+
 /* GET / — serve HTML config page */
 static esp_err_t handler_root(httpd_req_t *req) {
+    if (!http_guard(req, false)) return ESP_OK;
     httpd_resp_set_type(req, "text/html");
     httpd_resp_sendstr(req, CONFIG_PAGE_HTML);
     return ESP_OK;
@@ -387,11 +744,19 @@ static esp_err_t handler_root(httpd_req_t *req) {
 
 /* GET /api/status */
 static esp_err_t handler_status(httpd_req_t *req) {
+    if (!http_guard(req, false)) return ESP_OK;
     ml_config_ctx_t *ctx = (ml_config_ctx_t *)req->user_ctx;
     microlink_t *ml = ctx->ml;
 
     cJSON *json = cJSON_CreateObject();
     if (!json) return ESP_FAIL;
+
+    /* Firmware identity, so an update can be checked from outside
+     * (tools/ml_ota.py) */
+    const esp_app_desc_t *app = esp_app_get_description();
+    cJSON_AddStringToObject(json, "fw_version", app->version);
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    if (running) cJSON_AddStringToObject(json, "fw_partition", running->label);
 
     char ip_buf[16] = "0.0.0.0";
     if (ml) {
@@ -399,9 +764,12 @@ static esp_err_t handler_status(httpd_req_t *req) {
         if (vpn_ip) microlink_ip_to_str(vpn_ip, ip_buf);
         cJSON_AddStringToObject(json, "vpn_ip", ip_buf);
 
-        const char *states[] = {"IDLE","WIFI_WAIT","CONNECTING","REGISTERING","CONNECTED","RECONNECTING","ERROR"};
+        static const char *const states[] = {"IDLE", "WIFI_WAIT", "CONNECTING", "REGISTERING",
+                                             "CONNECTED", "RECONNECTING", "ERROR",
+                                             "AUTH_FAILED", "NEEDS_LOGIN"};
         int s = microlink_get_state(ml);
-        cJSON_AddStringToObject(json, "state", (s >= 0 && s <= 6) ? states[s] : "UNKNOWN");
+        int nstates = (int)(sizeof(states) / sizeof(states[0]));
+        cJSON_AddStringToObject(json, "state", (s >= 0 && s < nstates) ? states[s] : "UNKNOWN");
         cJSON_AddNumberToObject(json, "peer_count", microlink_get_peer_count(ml));
         cJSON_AddStringToObject(json, "hostname", ml->config.device_name ? ml->config.device_name : "");
     }
@@ -411,18 +779,14 @@ static esp_err_t handler_status(httpd_req_t *req) {
         heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
     cJSON_AddBoolToObject(json, "filter_enabled", ctx->filter_enabled);
 
-#ifdef CONFIG_ML_ENABLE_CELLULAR
-    cJSON_AddStringToObject(json, "connection",
-        ml_at_socket_is_ready() ? "cellular" : "wifi");
-#else
-    cJSON_AddStringToObject(json, "connection", "wifi");
-#endif
+    cJSON_AddStringToObject(json, "connection", active_connection());
 
     return send_json(req, json);
 }
 
 /* GET /api/settings */
 static esp_err_t handler_get_settings(httpd_req_t *req) {
+    if (!http_guard(req, false)) return ESP_OK;
     ml_config_ctx_t *ctx = (ml_config_ctx_t *)req->user_ctx;
 
     cJSON *json = cJSON_CreateObject();
@@ -436,8 +800,6 @@ static esp_err_t handler_get_settings(httpd_req_t *req) {
         ctx->settings.auth_key[0] ? "********" : "");
     cJSON_AddStringToObject(json, "device_prefix", ctx->settings.device_prefix);
     cJSON_AddStringToObject(json, "cellular_apn", ctx->settings.cellular_apn);
-    cJSON_AddStringToObject(json, "cellular_sim_pin",
-        ctx->settings.cellular_sim_pin[0] ? "****" : "");
     cJSON_AddStringToObject(json, "ppp_user", ctx->settings.ppp_user);
     cJSON_AddStringToObject(json, "ppp_pass",
         ctx->settings.ppp_pass[0] ? "********" : "");
@@ -459,6 +821,7 @@ static esp_err_t handler_get_settings(httpd_req_t *req) {
 
 /* POST /api/settings */
 static esp_err_t handler_post_settings(httpd_req_t *req) {
+    if (!http_guard(req, true)) return ESP_OK;
     ml_config_ctx_t *ctx = (ml_config_ctx_t *)req->user_ctx;
 
     char *body = read_post_body(req);
@@ -472,6 +835,28 @@ static esp_err_t handler_post_settings(httpd_req_t *req) {
     if (!json) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
         return ESP_FAIL;
+    }
+
+    /* Validate every field that reaches a modem AT command or the control
+     * connection BEFORE changing anything, so a rejected request leaves the
+     * stored settings untouched. Over-long values are rejected, not
+     * truncated. Masked placeholders / empty secrets mean "keep". */
+    {
+        const cJSON *it;
+        const char *bad = NULL;
+        #define STR_ITEM(name) (((it = cJSON_GetObjectItem(json, (name))) && cJSON_IsString(it)) \
+                                ? it->valuestring : NULL)
+        const char *v;
+        if (!bad && (v = STR_ITEM("cellular_apn"))) bad = check_cellular_apn(v);
+        if (!bad && (v = STR_ITEM("ppp_user"))) bad = check_ppp_user(v);
+        if (!bad && (v = STR_ITEM("ppp_pass")) && strcmp(v, "********") != 0) bad = check_ppp_pass(v);
+        if (!bad && (v = STR_ITEM("ctrl_host"))) bad = check_ctrl_host(v);
+        #undef STR_ITEM
+        if (bad) {
+            cJSON_Delete(json);
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, bad);
+            return ESP_FAIL;
+        }
     }
 
     /* Helper macro: clear field, copy new value, ensure null termination */
@@ -504,12 +889,6 @@ static esp_err_t handler_post_settings(httpd_req_t *req) {
     }
     if ((item = cJSON_GetObjectItem(json, "cellular_apn")) && cJSON_IsString(item)) {
         COPY_STR_FIELD(ctx->settings.cellular_apn, item->valuestring);
-    }
-    if ((item = cJSON_GetObjectItem(json, "cellular_sim_pin")) && cJSON_IsString(item)) {
-        const char *v = item->valuestring;
-        if (v[0] != '\0' && strcmp(v, "****") != 0) {
-            COPY_STR_FIELD(ctx->settings.cellular_sim_pin, v);
-        }
     }
     if ((item = cJSON_GetObjectItem(json, "ppp_user")) && cJSON_IsString(item)) {
         COPY_STR_FIELD(ctx->settings.ppp_user, item->valuestring);
@@ -554,6 +933,7 @@ static esp_err_t handler_post_settings(httpd_req_t *req) {
 
 /* GET /api/peers — all known peers with status */
 static esp_err_t handler_get_peers(httpd_req_t *req) {
+    if (!http_guard(req, false)) return ESP_OK;
     ml_config_ctx_t *ctx = (ml_config_ctx_t *)req->user_ctx;
     microlink_t *ml = ctx->ml;
 
@@ -586,6 +966,7 @@ static esp_err_t handler_get_peers(httpd_req_t *req) {
 
 /* GET /api/peers/allowed — current allowlist */
 static esp_err_t handler_get_allowed(httpd_req_t *req) {
+    if (!http_guard(req, false)) return ESP_OK;
     ml_config_ctx_t *ctx = (ml_config_ctx_t *)req->user_ctx;
 
     cJSON *json = cJSON_CreateObject();
@@ -611,6 +992,7 @@ static esp_err_t handler_get_allowed(httpd_req_t *req) {
 
 /* POST /api/peers/allowed — replace allowlist */
 static esp_err_t handler_post_allowed(httpd_req_t *req) {
+    if (!http_guard(req, true)) return ESP_OK;
     ml_config_ctx_t *ctx = (ml_config_ctx_t *)req->user_ctx;
 
     char *body = read_post_body(req);
@@ -672,6 +1054,7 @@ static esp_err_t handler_post_allowed(httpd_req_t *req) {
 
 /* DELETE /api/peers/allowed — clear allowlist */
 static esp_err_t handler_delete_allowed(httpd_req_t *req) {
+    if (!http_guard(req, true)) return ESP_OK;
     ml_config_ctx_t *ctx = (ml_config_ctx_t *)req->user_ctx;
 
     if (xSemaphoreTake(ctx->peer_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
@@ -691,6 +1074,7 @@ static esp_err_t handler_delete_allowed(httpd_req_t *req) {
 
 /* GET /api/monitor — temperature, RSSI, uptime, task stack watermarks */
 static esp_err_t handler_monitor(httpd_req_t *req) {
+    if (!http_guard(req, false)) return ESP_OK;
     ml_config_ctx_t *ctx = (ml_config_ctx_t *)req->user_ctx;
     microlink_t *ml = ctx->ml;
 
@@ -760,21 +1144,14 @@ static esp_err_t handler_monitor(httpd_req_t *req) {
     }
 
     /* Connection type */
-#ifdef CONFIG_ML_ENABLE_CELLULAR
-    if (ml_at_socket_is_ready()) {
-        cJSON_AddStringToObject(json, "connection", "cellular");
-    } else {
-        cJSON_AddStringToObject(json, "connection", "wifi");
-    }
-#else
-    cJSON_AddStringToObject(json, "connection", "wifi");
-#endif
+    cJSON_AddStringToObject(json, "connection", active_connection());
 
     return send_json(req, json);
 }
 
 /* POST /api/restart */
 static esp_err_t handler_restart(httpd_req_t *req) {
+    if (!http_guard(req, true)) return ESP_OK;
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"ok\":true,\"restarting\":true}");
 
@@ -784,12 +1161,92 @@ static esp_err_t handler_restart(httpd_req_t *req) {
     return ESP_OK;  /* unreachable */
 }
 
+#ifdef CONFIG_ML_CONFIG_HTTPD_OTA
+/* POST /api/ota: body = an app image (the .bin from the build), sent as
+ * application/octet-stream. Written to the next OTA slot, checked by
+ * esp_ota_end() (chip, SHA-256 digest, signature with secure boot), made
+ * the boot image, then the device restarts into it. With ML_OTA_ROLLBACK
+ * the new image is kept only once it reconnects to the tailnet. */
+static esp_err_t handler_ota(httpd_req_t *req) {
+    if (!http_guard_ct(req, "application/octet-stream")) return ESP_OK;
+
+    const esp_partition_t *part = esp_ota_get_next_update_partition(NULL);
+    if (!part) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "No OTA slot: flash a partition table with two OTA app partitions");
+        return ESP_OK;
+    }
+    size_t total = req->content_len;
+    if (total == 0 || total > part->size) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Image is empty or larger than the OTA slot");
+        return ESP_OK;
+    }
+
+    esp_ota_handle_t ota = 0;
+    esp_err_t err = esp_ota_begin(part, OTA_WITH_SEQUENTIAL_WRITES, &ota);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "OTA begin failed: %s", esp_err_to_name(err));
+        httpd_resp_send_500(req);
+        return ESP_OK;
+    }
+    ESP_LOGW(TAG, "Firmware upload started: %u bytes to %s", (unsigned)total, part->label);
+
+    char *buf = malloc(4096);
+    size_t got = 0;
+    int timeouts = 0;
+    err = buf ? ESP_OK : ESP_ERR_NO_MEM;
+    while (err == ESP_OK && got < total) {
+        size_t want = total - got < 4096 ? total - got : 4096;
+        int n = httpd_req_recv(req, buf, want);
+        if (n == HTTPD_SOCK_ERR_TIMEOUT && ++timeouts <= 6) continue;
+        if (n <= 0) {
+            err = ESP_FAIL;
+            break;
+        }
+        timeouts = 0;
+        err = esp_ota_write(ota, buf, (size_t)n);
+        got += (size_t)n;
+    }
+    free(buf);
+    if (err != ESP_OK) {
+        esp_ota_abort(ota);
+        ESP_LOGE(TAG, "Firmware upload failed after %u/%u bytes: %s",
+                 (unsigned)got, (unsigned)total, esp_err_to_name(err));
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Upload failed or not an app image");
+        return ESP_OK;
+    }
+    err = esp_ota_end(ota);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Uploaded image rejected: %s", esp_err_to_name(err));
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Image rejected (corrupt, wrong chip or bad signature)");
+        return ESP_OK;
+    }
+    err = esp_ota_set_boot_partition(part);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Could not select the new image: %s", esp_err_to_name(err));
+        httpd_resp_send_500(req);
+        return ESP_OK;
+    }
+
+    ESP_LOGW(TAG, "Firmware update written to %s; restarting", part->label);
+    char resp[96];
+    snprintf(resp, sizeof(resp), "{\"ok\":true,\"partition\":\"%s\",\"bytes\":%u,\"restarting\":true}",
+             part->label, (unsigned)total);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, resp);
+    vTaskDelay(pdMS_TO_TICKS(500));
+    esp_restart();
+    return ESP_OK;  /* unreachable */
+}
+#endif
+
 /* ============================================================================
  * WiFi List HTTP Handlers
  * ========================================================================== */
 
 /* GET /api/wifi — return WiFi list with masked passwords */
 static esp_err_t handler_get_wifi(httpd_req_t *req) {
+    if (!http_guard(req, false)) return ESP_OK;
     ml_config_ctx_t *ctx = (ml_config_ctx_t *)req->user_ctx;
 
     cJSON *json = cJSON_CreateObject();
@@ -812,6 +1269,7 @@ static esp_err_t handler_get_wifi(httpd_req_t *req) {
 
 /* POST /api/wifi — replace entire WiFi list */
 static esp_err_t handler_post_wifi(httpd_req_t *req) {
+    if (!http_guard(req, true)) return ESP_OK;
     ml_config_ctx_t *ctx = (ml_config_ctx_t *)req->user_ctx;
 
     char *body = read_post_body(req);
@@ -915,6 +1373,7 @@ bool ml_config_get_wifi_list(ml_config_wifi_list_t *list) {
         if (read_len > sizeof(ml_config_wifi_list_t)) read_len = sizeof(ml_config_wifi_list_t);
         err = nvs_get_blob(nvs, NVS_KEY_WIFI, list, &read_len);
         if (err == ESP_OK && list->count > 0 && list->count <= ML_CONFIG_MAX_WIFI_ENTRIES) {
+            terminate_wifi_list_strings(list);
             nvs_close(nvs);
             return true;
         }
@@ -930,6 +1389,7 @@ bool ml_config_get_wifi_list(ml_config_wifi_list_t *list) {
     size_t slen = sizeof(*settings);
     err = nvs_get_blob(nvs, NVS_KEY_SETTINGS, settings, &slen);
     nvs_close(nvs);
+    terminate_settings_strings(settings);
 
     if (err == ESP_OK && settings->wifi_ssid[0] != '\0') {
         list->count = 1;
@@ -978,6 +1438,7 @@ bool ml_config_get_nvs_wifi(char *ssid, size_t ssid_len,
     size_t len = sizeof(*settings);
     err = nvs_get_blob(nvs, NVS_KEY_SETTINGS, settings, &len);
     nvs_close(nvs);
+    terminate_settings_strings(settings);
 
     if (err != ESP_OK || len < 1 || settings->version < 1 || settings->wifi_ssid[0] == '\0') {
         free(settings);
@@ -1010,8 +1471,17 @@ bool ml_config_get_nvs_ppp(char *user, size_t user_len,
     size_t len = sizeof(*settings);
     err = nvs_get_blob(nvs, NVS_KEY_SETTINGS, settings, &len);
     nvs_close(nvs);
+    terminate_settings_strings(settings);
 
     if (err != ESP_OK || len < 1 || settings->version < 3 || settings->ppp_user[0] == '\0') {
+        free(settings);
+        return false;
+    }
+    settings->ppp_user[sizeof(settings->ppp_user) - 1] = '\0';
+    settings->ppp_pass[sizeof(settings->ppp_pass) - 1] = '\0';
+    if (check_ppp_user(settings->ppp_user) || check_ppp_pass(settings->ppp_pass)) {
+        ESP_LOGW(TAG, "Ignoring invalid PPP credentials in NVS");
+        ml_at_secure_zero(settings, sizeof(*settings));
         free(settings);
         return false;
     }
@@ -1025,7 +1495,8 @@ bool ml_config_get_nvs_ppp(char *user, size_t user_len,
         pass[pass_len - 1] = '\0';
     }
 
-    ESP_LOGI(TAG, "PPP credentials from NVS: user=%s", settings->ppp_user);
+    ESP_LOGI(TAG, "PPP credentials from NVS");
+    ml_at_secure_zero(settings, sizeof(*settings));
     free(settings);
     return true;
 }
@@ -1041,8 +1512,15 @@ bool ml_config_get_nvs_apn(char *apn, size_t apn_len) {
     size_t len = sizeof(*settings);
     err = nvs_get_blob(nvs, NVS_KEY_SETTINGS, settings, &len);
     nvs_close(nvs);
+    terminate_settings_strings(settings);
 
     if (err != ESP_OK || len < 1 || settings->cellular_apn[0] == '\0') {
+        free(settings);
+        return false;
+    }
+    settings->cellular_apn[sizeof(settings->cellular_apn) - 1] = '\0';
+    if (check_cellular_apn(settings->cellular_apn)) {
+        ESP_LOGW(TAG, "Ignoring invalid APN in NVS");
         free(settings);
         return false;
     }
@@ -1098,51 +1576,134 @@ ml_config_ctx_t *ml_config_httpd_init(void) {
     return ctx;
 }
 
-esp_err_t ml_config_httpd_start(ml_config_ctx_t *ctx, microlink_t *ml) {
-    if (!ctx) return ESP_ERR_INVALID_ARG;
-    ctx->ml = ml;
+/* The HTTP server is started once and then kept for the life of the process;
+ * microlink_stop()/microlink_destroy() only detach it from the context.
+ *
+ * Why: on ESP-IDF 5.3 esp_http_server's task ends with
+ * vTaskDeleteWithCaps(xTaskGetCurrentTaskHandle()). vTaskDelete() of the
+ * calling task never returns, so the stack and TCB that call was meant to
+ * free afterwards are leaked: 6144 + sizeof(StaticTask_t) bytes of internal
+ * RAM (6492 on the S3) on every httpd_stop(). Stopping and restarting the
+ * server with every microlink_stop()/microlink_start() leaked that much per
+ * cycle.
+ *
+ * While no context is attached every URI answers 503. Handlers run with
+ * s_attach_lock held, so detaching waits for an in-flight request and the
+ * context cannot be freed under it. */
+static httpd_handle_t s_httpd;
+static ml_config_ctx_t *s_attached;
+static SemaphoreHandle_t s_attach_lock;
+static StaticSemaphore_t s_attach_lock_buf;
+
+/* Every URI is registered with this handler; user_ctx is the real one. */
+static esp_err_t handler_dispatch(httpd_req_t *req) {
+    esp_err_t (*real)(httpd_req_t *) = (esp_err_t (*)(httpd_req_t *))req->user_ctx;
+    xSemaphoreTake(s_attach_lock, portMAX_DELAY);
+    ml_config_ctx_t *ctx = s_attached;
+    if (!ctx || !ctx->ml) {
+        xSemaphoreGive(s_attach_lock);
+        /* Without MicroLink there is no tailnet address, so only a LAN
+         * address (ALLOW_LAN) can pass; everyone else gets the same 403
+         * as when MicroLink is running. */
+        uint32_t local_ip;
+        if (!local_addr_allowed(req, NULL, &local_ip)) {
+            httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "Not available on this interface");
+            return ESP_OK;
+        }
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_sendstr(req, "MicroLink is not running");
+        return ESP_OK;
+    }
+    req->user_ctx = ctx;  /* per-request field; the handlers read the context from it */
+    esp_err_t ret = real(req);
+    xSemaphoreGive(s_attach_lock);
+    return ret;
+}
+
+static esp_err_t config_server_start_once(void) {
+    if (s_httpd) return ESP_OK;
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.stack_size = 6144;
     config.max_uri_handlers = 14;
     config.uri_match_fn = httpd_uri_match_wildcard;
 
-    esp_err_t err = httpd_start(&ctx->httpd, &config);
+    httpd_handle_t h = NULL;
+    esp_err_t err = httpd_start(&h, &config);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start HTTP server: %s", esp_err_to_name(err));
         return err;
     }
 
-    /* Register URI handlers */
-    const httpd_uri_t uris[] = {
-        { .uri = "/",                .method = HTTP_GET,    .handler = handler_root,          .user_ctx = ctx },
-        { .uri = "/api/status",      .method = HTTP_GET,    .handler = handler_status,        .user_ctx = ctx },
-        { .uri = "/api/settings",    .method = HTTP_GET,    .handler = handler_get_settings,  .user_ctx = ctx },
-        { .uri = "/api/settings",    .method = HTTP_POST,   .handler = handler_post_settings, .user_ctx = ctx },
-        { .uri = "/api/monitor",     .method = HTTP_GET,    .handler = handler_monitor,       .user_ctx = ctx },
-        { .uri = "/api/peers",       .method = HTTP_GET,    .handler = handler_get_peers,     .user_ctx = ctx },
-        { .uri = "/api/peers/allowed", .method = HTTP_GET,  .handler = handler_get_allowed,   .user_ctx = ctx },
-        { .uri = "/api/peers/allowed", .method = HTTP_POST, .handler = handler_post_allowed,  .user_ctx = ctx },
-        { .uri = "/api/peers/allowed", .method = HTTP_DELETE, .handler = handler_delete_allowed, .user_ctx = ctx },
-        { .uri = "/api/restart",     .method = HTTP_POST,   .handler = handler_restart,       .user_ctx = ctx },
-        { .uri = "/api/wifi",        .method = HTTP_GET,    .handler = handler_get_wifi,      .user_ctx = ctx },
-        { .uri = "/api/wifi",        .method = HTTP_POST,   .handler = handler_post_wifi,     .user_ctx = ctx },
+    /* Register URI handlers (user_ctx = the real handler, see handler_dispatch) */
+    static const struct {
+        const char *uri;
+        httpd_method_t method;
+        esp_err_t (*fn)(httpd_req_t *);
+    } routes[] = {
+        { "/",                  HTTP_GET,    handler_root },
+        { "/api/status",        HTTP_GET,    handler_status },
+        { "/api/settings",      HTTP_GET,    handler_get_settings },
+        { "/api/settings",      HTTP_POST,   handler_post_settings },
+        { "/api/monitor",       HTTP_GET,    handler_monitor },
+        { "/api/peers",         HTTP_GET,    handler_get_peers },
+        { "/api/peers/allowed", HTTP_GET,    handler_get_allowed },
+        { "/api/peers/allowed", HTTP_POST,   handler_post_allowed },
+        { "/api/peers/allowed", HTTP_DELETE, handler_delete_allowed },
+        { "/api/restart",       HTTP_POST,   handler_restart },
+        { "/api/wifi",          HTTP_GET,    handler_get_wifi },
+        { "/api/wifi",          HTTP_POST,   handler_post_wifi },
+#ifdef CONFIG_ML_CONFIG_HTTPD_OTA
+        { "/api/ota",           HTTP_POST,   handler_ota },
+#endif
     };
 
-    for (int i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
-        httpd_register_uri_handler(ctx->httpd, &uris[i]);
+    for (int i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {
+        httpd_uri_t u = {
+            .uri = routes[i].uri,
+            .method = routes[i].method,
+            .handler = handler_dispatch,
+            .user_ctx = (void *)routes[i].fn,
+        };
+        httpd_register_uri_handler(h, &u);
     }
 
+    s_httpd = h;
     ESP_LOGI(TAG, "HTTP config server started on port %d", config.server_port);
     return ESP_OK;
 }
 
+esp_err_t ml_config_httpd_start(ml_config_ctx_t *ctx, microlink_t *ml) {
+    if (!ctx) return ESP_ERR_INVALID_ARG;
+    if (!s_attach_lock) {
+        s_attach_lock = xSemaphoreCreateMutexStatic(&s_attach_lock_buf);
+    }
+
+    http_pw_init();
+
+    esp_err_t err = config_server_start_once();
+    if (err != ESP_OK) return err;
+
+    xSemaphoreTake(s_attach_lock, portMAX_DELAY);
+    ctx->ml = ml;
+    ctx->httpd = s_httpd;
+    s_attached = ctx;
+    xSemaphoreGive(s_attach_lock);
+    return ESP_OK;
+}
+
 void ml_config_httpd_stop(ml_config_ctx_t *ctx) {
-    if (!ctx) return;
-    if (ctx->httpd) {
-        httpd_stop(ctx->httpd);
-        ctx->httpd = NULL;
-        ESP_LOGI(TAG, "HTTP config server stopped");
+    if (!ctx || !s_attach_lock) return;
+    /* Waits for a request being handled for this context to finish. */
+    xSemaphoreTake(s_attach_lock, portMAX_DELAY);
+    bool was_attached = (s_attached == ctx);
+    if (was_attached) s_attached = NULL;
+    ctx->ml = NULL;
+    ctx->httpd = NULL;
+    xSemaphoreGive(s_attach_lock);
+    if (was_attached) {
+        ESP_LOGI(TAG, "HTTP config server detached (server kept running)");
     }
 }
 

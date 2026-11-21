@@ -94,7 +94,10 @@ def check_microlink():
     applied = [int(n) for n in re.findall(r"^\s+- #(\d+)\b", text, re.M)]
     head = ls_remote(ML_REPO, "HEAD")[0][0]
     print(f"## MicroLink（{ML_REPO}）")
-    print(f"- 同梱の元: {base[:7]}（ほかに未マージの PR {', '.join('#' + str(n) for n in applied)} を取り込み済み）")
+    if applied:
+        print(f"- 同梱の元: {base[:7]}（ほかに未マージの PR {', '.join('#' + str(n) for n in applied)} を取り込み済み）")
+    else:
+        print(f"- 同梱の元: {base[:7]}（取り込んだ未マージの PR はなし）")
     updated = False
     if head == base:
         print("- 本家の既定のブランチ: 更新なし")

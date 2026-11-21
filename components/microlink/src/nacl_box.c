@@ -10,24 +10,7 @@
 #include "x25519.h"
 #include <string.h>
 #include <stdbool.h>
-
-/* Debug logging - set to 1 to enable */
-#define NACL_BOX_DEBUG 0
-
-#if NACL_BOX_DEBUG
-#include "esp_log.h"
-#include <stdio.h>
-static const char *NACL_TAG = "nacl_box";
-#define NACL_LOG_HEX(tag, data, len) do { \
-    char hex[65]; \
-    int hlen = (len) > 32 ? 32 : (len); \
-    for (int i = 0; i < hlen; i++) sprintf(hex + i*2, "%02x", (data)[i]); \
-    hex[hlen*2] = 0; \
-    ESP_LOGI(NACL_TAG, "%s (%d bytes): %s%s", tag, (int)(len), hex, (len) > 32 ? "..." : ""); \
-} while(0)
-#else
-#define NACL_LOG_HEX(tag, data, len)
-#endif
+#include "freertos/FreeRTOS.h"
 
 /* ============================================================================
  * Salsa20 Core (different quarter round than ChaCha20)
@@ -109,7 +92,7 @@ static void hsalsa20(uint8_t *out, const uint8_t *nonce, const uint8_t *key) {
     int i;
 
     /* sigma = "expand 32-byte k" */
-    static const uint8_t sigma[16] = "expand 32-byte k";
+    static const uint8_t sigma[16] __attribute__((nonstring)) = "expand 32-byte k";
 
     x[0]  = load32_le(sigma);
     x[5]  = load32_le(sigma + 4);
@@ -175,68 +158,6 @@ static void hsalsa20(uint8_t *out, const uint8_t *nonce, const uint8_t *key) {
     store32_le(out + 20, x[7]);
     store32_le(out + 24, x[8]);
     store32_le(out + 28, x[9]);
-}
-
-/* XSalsa20 stream cipher - uses HSalsa20 for subkey derivation */
-static void xsalsa20(uint8_t *out, const uint8_t *in, size_t len,
-                     const uint8_t *nonce, const uint8_t *key) {
-    uint8_t subkey[32];
-    uint8_t block[64];
-    uint8_t state[64];
-    size_t i;
-    uint64_t ctr = 0;
-
-    /* Derive subkey using first 16 bytes of nonce */
-    hsalsa20(subkey, nonce, key);
-
-    /* sigma = "expand 32-byte k" */
-    static const uint8_t sigma[16] = "expand 32-byte k";
-
-    /* Set up state for Salsa20 with remaining 8 bytes of nonce
-     * Salsa20 state layout (16 x 32-bit words):
-     *   [0]  = sigma[0:4]    [1]  = key[0:4]     [2]  = key[4:8]     [3]  = key[8:12]
-     *   [4]  = key[12:16]    [5]  = sigma[4:8]   [6]  = nonce[0:4]   [7]  = nonce[4:8]
-     *   [8]  = counter_lo    [9]  = counter_hi   [10] = sigma[8:12]  [11] = key[16:20]
-     *   [12] = key[20:24]    [13] = key[24:28]   [14] = key[28:32]   [15] = sigma[12:16]
-     */
-    memcpy(state + 0, sigma, 4);           /* word 0: sigma[0:4] */
-    memcpy(state + 4, subkey, 4);          /* word 1: key[0:4] */
-    memcpy(state + 8, subkey + 4, 4);      /* word 2: key[4:8] */
-    memcpy(state + 12, subkey + 8, 4);     /* word 3: key[8:12] */
-    memcpy(state + 16, subkey + 12, 4);    /* word 4: key[12:16] */
-    memcpy(state + 20, sigma + 4, 4);      /* word 5: sigma[4:8] */
-    memcpy(state + 24, nonce + 16, 4);     /* word 6: nonce[16:20] */
-    memcpy(state + 28, nonce + 20, 4);     /* word 7: nonce[20:24] */
-    memset(state + 32, 0, 8);              /* words 8-9: counter = 0 */
-    memcpy(state + 40, sigma + 8, 4);      /* word 10: sigma[8:12] */
-    memcpy(state + 44, subkey + 16, 4);    /* word 11: key[16:20] */
-    memcpy(state + 48, subkey + 20, 4);    /* word 12: key[20:24] */
-    memcpy(state + 52, subkey + 24, 4);    /* word 13: key[24:28] */
-    memcpy(state + 56, subkey + 28, 4);    /* word 14: key[28:32] */
-    memcpy(state + 60, sigma + 12, 4);     /* word 15: sigma[12:16] */
-
-    while (len > 0) {
-        /* Set counter in state */
-        store32_le(state + 32, (uint32_t)ctr);
-        store32_le(state + 36, (uint32_t)(ctr >> 32));
-
-        salsa20_core(block, state);
-
-        size_t chunk = (len < 64) ? len : 64;
-        for (i = 0; i < chunk; i++) {
-            out[i] = in[i] ^ block[i];
-        }
-
-        len -= chunk;
-        in += chunk;
-        out += chunk;
-        ctr++;
-    }
-
-    /* Clear sensitive data */
-    memset(subkey, 0, sizeof(subkey));
-    memset(block, 0, sizeof(block));
-    memset(state, 0, sizeof(state));
 }
 
 /* ============================================================================
@@ -421,15 +342,10 @@ static int secretbox(uint8_t *ciphertext,
     uint8_t subkey[32];
     uint8_t block0[64];
     uint8_t state[64];
-    static const uint8_t sigma[16] = "expand 32-byte k";
-
-    NACL_LOG_HEX("secretbox key", key, 32);
-    NACL_LOG_HEX("secretbox nonce", nonce, 24);
-    NACL_LOG_HEX("secretbox plaintext", plaintext, plaintext_len);
+    static const uint8_t sigma[16] __attribute__((nonstring)) = "expand 32-byte k";
 
     /* Derive subkey using first 16 bytes of nonce via HSalsa20 */
     hsalsa20(subkey, nonce, key);
-    NACL_LOG_HEX("secretbox subkey (HSalsa20)", subkey, 32);
 
     /* Build Salsa20 state for XSalsa20 (uses subkey + last 8 bytes of nonce)
      * Salsa20 state layout (16 x 32-bit words):
@@ -457,12 +373,10 @@ static int secretbox(uint8_t *ciphertext,
 
     /* Generate block 0: first 32 bytes = Poly1305 key, next 32 = encryption start */
     salsa20_core(block0, state);
-    NACL_LOG_HEX("block0 (Poly1305 key + keystream)", block0, 64);
 
     /* Poly1305 key is first 32 bytes of block 0 */
     uint8_t poly_key[32];
     memcpy(poly_key, block0, 32);
-    NACL_LOG_HEX("Poly1305 key (block0[0:32])", poly_key, 32);
 
     /* Encrypt plaintext starting from byte 32 of block 0 */
     uint8_t *out = ciphertext + NACL_BOX_MACBYTES;  /* Leave room for MAC */
@@ -498,11 +412,8 @@ static int secretbox(uint8_t *ciphertext,
         ctr++;
     }
 
-    NACL_LOG_HEX("ciphertext (after XOR)", ciphertext + NACL_BOX_MACBYTES, plaintext_len);
-
     /* Compute MAC over ciphertext */
     poly1305(ciphertext, ciphertext + NACL_BOX_MACBYTES, plaintext_len, poly_key);
-    NACL_LOG_HEX("Poly1305 MAC", ciphertext, NACL_BOX_MACBYTES);
 
     /* Clear sensitive data */
     memset(poly_key, 0, sizeof(poly_key));
@@ -519,9 +430,6 @@ int nacl_box_beforenm(uint8_t *shared_key,
     uint8_t scalarmult_result[32];
     static const uint8_t zero_nonce[16] = {0};
 
-    NACL_LOG_HEX("beforenm recipient_pk", recipient_pk, 32);
-    NACL_LOG_HEX("beforenm sender_sk", sender_sk, 32);
-
     /* X25519 shared secret
      * The x25519() function with clamp=1 will properly clamp the scalar (private key)
      * by clearing the 3 lowest bits, clearing the highest bit, and setting bit 254.
@@ -531,11 +439,9 @@ int nacl_box_beforenm(uint8_t *shared_key,
      * NaCl uses clamped scalars for key agreement, so we pass clamp=1.
      */
     x25519(scalarmult_result, sender_sk, recipient_pk, 1);
-    NACL_LOG_HEX("X25519 shared secret", scalarmult_result, 32);
 
     /* HSalsa20 to derive symmetric key */
     hsalsa20(shared_key, zero_nonce, scalarmult_result);
-    NACL_LOG_HEX("HSalsa20 derived key", shared_key, 32);
 
     memset(scalarmult_result, 0, sizeof(scalarmult_result));
     return 0;
@@ -560,26 +466,60 @@ static struct {
 
 static int s_shared_cache_next;
 
+static uint8_t s_shared_cache_owner_sk[32];
+/* Every DISCO caller now runs on the wg_mgr task (ml_tcp.c and ml_udp.c post
+ * requests to it instead of calling in), but the lock is kept: it is cheap,
+ * and the cache must not depend on that invariant. The X25519 itself runs
+ * outside the critical section. */
+static portMUX_TYPE s_shared_cache_lock = portMUX_INITIALIZER_UNLOCKED;
+
 int nacl_box_shared_get(uint8_t *shared_key,
                         const uint8_t *peer_pk,
                         const uint8_t *our_sk) {
+    /* The cache was keyed on peer_pk only. If our disco key
+     * changes in the same boot (microlink_factory_reset() + re-init, NVS
+     * failure -> ephemeral keys, or multiple instances) every hit would return
+     * a shared secret derived from the OLD key and DISCO would silently stop
+     * working. Flush when the owning secret key changes. */
+    bool hit = false;
+    taskENTER_CRITICAL(&s_shared_cache_lock);
+    if (memcmp(s_shared_cache_owner_sk, our_sk, 32) != 0) {
+        memset(s_shared_cache, 0, sizeof(s_shared_cache));
+        s_shared_cache_next = 0;
+        memcpy(s_shared_cache_owner_sk, our_sk, 32);
+    }
     for (int i = 0; i < NACL_SHARED_CACHE_SLOTS; i++) {
         if (s_shared_cache[i].valid &&
             memcmp(s_shared_cache[i].peer_pk, peer_pk, 32) == 0) {
             memcpy(shared_key, s_shared_cache[i].shared_key, 32);
-            return 0;
+            hit = true;
+            break;
         }
     }
+    taskEXIT_CRITICAL(&s_shared_cache_lock);
+    if (hit) return 0;
 
     int ret = nacl_box_beforenm(shared_key, peer_pk, our_sk);
     if (ret != 0) return ret;
 
-    int slot = s_shared_cache_next;
-    s_shared_cache_next = (s_shared_cache_next + 1) % NACL_SHARED_CACHE_SLOTS;
-    memcpy(s_shared_cache[slot].peer_pk, peer_pk, 32);
-    memcpy(s_shared_cache[slot].shared_key, shared_key, 32);
-    s_shared_cache[slot].valid = true;
+    taskENTER_CRITICAL(&s_shared_cache_lock);
+    if (memcmp(s_shared_cache_owner_sk, our_sk, 32) == 0) {
+        int slot = s_shared_cache_next;
+        s_shared_cache_next = (s_shared_cache_next + 1) % NACL_SHARED_CACHE_SLOTS;
+        memcpy(s_shared_cache[slot].peer_pk, peer_pk, 32);
+        memcpy(s_shared_cache[slot].shared_key, shared_key, 32);
+        s_shared_cache[slot].valid = true;
+    }
+    taskEXIT_CRITICAL(&s_shared_cache_lock);
     return 0;
+}
+
+void nacl_box_shared_cache_wipe(void) {
+    taskENTER_CRITICAL(&s_shared_cache_lock);
+    memset(s_shared_cache, 0, sizeof(s_shared_cache));
+    memset(s_shared_cache_owner_sk, 0, sizeof(s_shared_cache_owner_sk));
+    s_shared_cache_next = 0;
+    taskEXIT_CRITICAL(&s_shared_cache_lock);
 }
 
 int nacl_box_afternm(uint8_t *ciphertext,
@@ -625,17 +565,13 @@ static int secretbox_open(uint8_t *plaintext,
     uint8_t block0[64];
     uint8_t state[64];
     uint8_t computed_mac[16];
-    static const uint8_t sigma[16] = "expand 32-byte k";
+    static const uint8_t sigma[16] __attribute__((nonstring)) = "expand 32-byte k";
 
     if (ciphertext_len < NACL_BOX_MACBYTES) {
         return -1;
     }
 
     size_t plaintext_len = ciphertext_len - NACL_BOX_MACBYTES;
-
-    NACL_LOG_HEX("secretbox_open key", key, 32);
-    NACL_LOG_HEX("secretbox_open nonce", nonce, 24);
-    NACL_LOG_HEX("secretbox_open ciphertext", ciphertext, ciphertext_len);
 
     /* Derive subkey using first 16 bytes of nonce via HSalsa20 */
     hsalsa20(subkey, nonce, key);
@@ -666,11 +602,8 @@ static int secretbox_open(uint8_t *plaintext,
 
     /* Verify MAC (ciphertext starts after MAC) */
     poly1305(computed_mac, ciphertext + NACL_BOX_MACBYTES, plaintext_len, poly_key);
-    NACL_LOG_HEX("computed MAC", computed_mac, 16);
-    NACL_LOG_HEX("expected MAC", ciphertext, 16);
 
     if (verify16(computed_mac, ciphertext) != 0) {
-        NACL_LOG_HEX("MAC verification FAILED", computed_mac, 16);
         memset(poly_key, 0, sizeof(poly_key));
         memset(subkey, 0, sizeof(subkey));
         memset(block0, 0, sizeof(block0));
@@ -711,8 +644,6 @@ static int secretbox_open(uint8_t *plaintext,
         out += chunk;
         ctr++;
     }
-
-    NACL_LOG_HEX("decrypted plaintext", plaintext, plaintext_len);
 
     /* Clear sensitive data */
     memset(poly_key, 0, sizeof(poly_key));

@@ -9,6 +9,9 @@ static const char *TAG = "tailscale";
 
 static microlink_t *s_ml;
 static ts_connected_cb_t s_on_connected;
+// 認証キーが拒否された・ログインを求められた。MicroLink は再試行のたびに状態を REGISTERING に戻すので、
+// 接続できるまで覚えておく
+static volatile bool s_auth_error;
 
 static const char *state_name(microlink_state_t st)
 {
@@ -20,6 +23,8 @@ static const char *state_name(microlink_state_t st)
     case ML_STATE_CONNECTED: return "connected";
     case ML_STATE_RECONNECTING: return "reconnecting";
     case ML_STATE_ERROR: return "error";
+    case ML_STATE_AUTH_FAILED: return "auth_failed";
+    case ML_STATE_NEEDS_LOGIN: return "needs_login";
     }
     return "unknown";
 }
@@ -27,7 +32,11 @@ static const char *state_name(microlink_state_t st)
 static void on_state(microlink_t *ml, microlink_state_t st, void *user)
 {
     ESP_LOGI(TAG, "state: %s", state_name(st));
+    if (st == ML_STATE_AUTH_FAILED || st == ML_STATE_NEEDS_LOGIN) {
+        s_auth_error = true;
+    }
     if (st == ML_STATE_CONNECTED) {
+        s_auth_error = false;
         char ip[16];
         microlink_ip_to_str(microlink_get_vpn_ip(ml), ip);
         ESP_LOGI(TAG, "connected to tailnet as %s (%s)", g_cfg.ts_hostname, ip);
@@ -88,7 +97,7 @@ void ts_vpn_ip_str(char out[16])
 
 bool ts_has_error(void)
 {
-    return s_ml && (microlink_auth_failed(s_ml) || microlink_get_state(s_ml) == ML_STATE_ERROR);
+    return s_ml && (s_auth_error || microlink_get_state(s_ml) == ML_STATE_ERROR);
 }
 
 bool ts_resolve(const char *hostname, char *ip_out, size_t len)
@@ -126,5 +135,5 @@ void ts_status_to_json(cJSON *o)
     cJSON_AddStringToObject(t, "ip", ip);
     cJSON_AddStringToObject(t, "hostname", g_cfg.ts_hostname);
     cJSON_AddNumberToObject(t, "peers", microlink_get_peer_count(s_ml));
-    cJSON_AddBoolToObject(t, "auth_error", microlink_auth_failed(s_ml));
+    cJSON_AddBoolToObject(t, "auth_error", s_auth_error);
 }

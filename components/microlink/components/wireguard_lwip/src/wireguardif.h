@@ -40,7 +40,9 @@
 #include "wireguard.h"  // For wireguard_derp_output_fn typedef
 
 // Default MTU for WireGuard is 1420 bytes
-#define WIREGUARDIF_MTU (1420)
+/* Tailscale tunnel MTU is 1280 (tstun.DefaultTUNMTU); 1420 let inbound
+ * packets exceed what peers expect/forward (issue #34). */
+#define WIREGUARDIF_MTU (1280)
 
 #define WIREGUARDIF_DEFAULT_PORT		(51820)
 #define WIREGUARDIF_KEEPALIVE_DEFAULT	(0xFFFF)
@@ -117,16 +119,27 @@ err_t wireguardif_add_peer(struct netif *netif, struct wireguardif_peer *peer, u
 // Remove the given peer from the network interface
 err_t wireguardif_remove_peer(struct netif *netif, u8_t peer_index);
 
+// Add an allowed IP (e.g. the peer's IPv6 /128 next to its IPv4 /32) to a
+// peer that is already installed. No-op if it is already there; ERR_MEM if
+// the peer has no free slot (WIREGUARD_MAX_SRC_IPS).
+err_t wireguardif_add_allowed_ip(struct netif *netif, u8_t peer_index, const ip_addr_t *ip, const ip_addr_t *mask);
+
 // Update the "connect" IP of the given peer
 err_t wireguardif_update_endpoint(struct netif *netif, u8_t peer_index, const ip_addr_t *ip, u16_t port);
+
+// Update the "connect" IP and also move the live endpoint to it now, without
+// a handshake (roaming an established session). ip_addr_any = via DERP.
+err_t wireguardif_set_endpoint(struct netif *netif, u8_t peer_index, const ip_addr_t *ip, u16_t port);
+
+// Clear the DERP / UDP output callbacks and their contexts. Output then
+// fails with ERR_RTE/ERR_CONN instead of calling back into the owner. For a
+// netif that has to be leaked while lwIP may still route through it.
+void wireguardif_detach_outputs(struct netif *netif);
 
 // Try and connect to the given peer
 err_t wireguardif_connect(struct netif *netif, u8_t peer_index);
 
-// Stop trying to connect to the given peer
-err_t wireguardif_disconnect(struct netif *netif, u8_t peer_index);
-
-// Is the given peer "up"? A peer is up if it has a valid session key it can communicate with
+// Is the given peer "up"? A peer is up if it has a session keypair transport data can be sent with now (wg_peer_can_send)
 err_t wireguardif_peer_is_up(struct netif *netif, u8_t peer_index, ip_addr_t *current_ip, u16_t *current_port);
 
 // Register a DERP relay output callback for peers without direct endpoints
@@ -135,28 +148,26 @@ err_t wireguardif_peer_is_up(struct netif *netif, u8_t peer_index, ip_addr_t *cu
 // fn: callback function, ctx: user context passed to callback
 void wireguardif_set_derp_output(struct netif *netif, wireguard_derp_output_fn fn, void *ctx);
 
+// Install an IP packet filter (call once, before traffic flows).
+void wireguardif_set_ip_filter(struct netif *netif, wireguard_ip_filter_fn rx_allow,
+                               wireguard_ip_note_fn tx_note, void *ctx);
+
 // Force initiation of handshake to a DERP-only peer
 // Use this for peers where connect() would fail due to no direct endpoint
 // The handshake will be routed through the DERP callback if set
 err_t wireguardif_connect_derp(struct netif *netif, u8_t peer_index);
 
-// Inject a received packet into the WireGuard interface (for magicsock demux)
-// This allows an external unified socket to receive all packets and route
-// WireGuard packets to this interface. The packet data is copied internally.
-// src_ip: source IP in network byte order (0 for DERP)
-// src_port: source port in host byte order
-// data: raw packet data
-// len: packet length
-err_t wireguardif_inject_packet(struct netif *netif, uint32_t src_ip, uint16_t src_port,
-                                 const uint8_t *data, size_t len);
-
-// Check if packet looks like a WireGuard packet (type 1-4)
-// Returns true if this appears to be a WireGuard packet
-bool wireguardif_is_wireguard_packet(const uint8_t *data, size_t len);
-
 // Shutdown WireGuard interface - cancels all timers before freeing resources
 // MUST be called before netif_remove/mem_free to prevent use-after-free in wireguardif_tmr
 void wireguardif_shutdown(struct netif *netif);
+
+// Release the WireGuard device behind the netif (the struct wireguard_device
+// that wireguardif_init allocated: private key, peers, keypairs, handshake
+// state). Cancels the timer, removes the device's own UDP PCB if it has one,
+// zeroes the key material and frees it; netif->state becomes NULL.
+// Call on the tcpip thread (or with the core lock held), after the netif has
+// been removed and before the netif itself is freed. Safe to call twice.
+void wireguardif_free(struct netif *netif);
 
 // Run WireGuard periodic processing (handshakes, keepalives, rekeys) from caller's task.
 // In magicsock mode, the internal sys_timeout timer is disabled to avoid running heavy
@@ -165,13 +176,17 @@ void wireguardif_periodic(struct netif *netif);
 
 // Disable WireGuard's internal UDP socket binding
 // Call before wireguardif_init to prevent WireGuard from binding its own socket.
-// The caller is then responsible for receiving packets and calling wireguardif_inject_packet.
+// The caller is then responsible for receiving packets and calling wireguardif_network_rx.
 void wireguardif_disable_socket_bind(void);
 
 // Set the UDP output callback for magicsock mode
 // When socket binding is disabled, this callback is used to send packets
 // via an external unified socket instead of the internal lwIP UDP PCB.
 void wireguardif_set_udp_output(struct netif *netif, wireguard_udp_output_fn fn, void *ctx);
+
+/* Zero-copy variant. Takes precedence over wireguardif_set_udp_output() when
+ * set; prefer it whenever the sender can consume a pbuf. */
+void wireguardif_set_udp_output_pbuf(struct netif *netif, wireguard_udp_output_pbuf_fn fn, void *ctx);
 
 // Force all peer output through DERP relay callback (cellular mode).
 // When enabled, peer_output always uses DERP even if peer has a direct endpoint.

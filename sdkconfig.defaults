@@ -30,6 +30,9 @@ CONFIG_HTTPD_MAX_URI_LEN=256
 CONFIG_ML_ENABLE_CONFIG_HTTPD=n
 # 中継（DERP）の既定の地域を東京にする（MicroLink の既定は 9 のダラス）
 CONFIG_ML_DERP_REGION=7
+# 更新したファームウェアは Wi-Fi につながった時点で正常とみなす（main/ota.c）。MicroLink の
+# 「tailnet につながらなければ元に戻す」は使わない（Tailscale を使わない設定では必ず元に戻ってしまう）
+CONFIG_ML_OTA_ROLLBACK=n
 # WireGuard / Noise に必要な設定
 CONFIG_LWIP_MAX_SOCKETS=16
 CONFIG_LWIP_SO_RCVBUF=y
